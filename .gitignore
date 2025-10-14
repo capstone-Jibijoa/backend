@@ -1,0 +1,10 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+
+# 가상환경 폴더
+venv/
+
+# IDE 설정 폴더 (JetBrains)
+.idea/
+
+# 민감한 정보를 포함하는 파일
+.env
