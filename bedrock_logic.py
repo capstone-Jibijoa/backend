@@ -21,13 +21,12 @@ def get_bedrock_client():
         )
         return client
     except Exception as e:
-        print(f"Bedrock 클라이언트 생성 실패: {e}")
-        return None
+        raise HTTPException(status_code=500, detail=f"Bedrock 클라이언트 생성 실패: {e}")
 
 # 텍스트를 임베딩 벡터로 변환하는 함수
 def get_embedding_from_bedrock(text: str) -> list[float]:
     """
-    주어진 텍스트를 Bedrock의 Titan 모델을 사용하여 임베딩 벡터로 변환합니다.
+    주어진 텍스트를 claude 4.1 opus를 사용하여 임베딩 벡터로 변환합니다.
 
     Args:
         text (str): 임베딩할 텍스트.
@@ -37,9 +36,9 @@ def get_embedding_from_bedrock(text: str) -> list[float]:
     """
     client = get_bedrock_client()
     if not client:
-        return None
+        raise HTTPException(status_code=500, detail="Bedrock 클라이언트 생성 실패")
 
-    model_id = "amazon.titan-embed-text-v1" # 사용할 임베딩 모델 ID
+    model_id = "anthropic.claude-opus-4-1-20250805-v1:0" # 사용할 임베딩 모델 ID
     
     request_body = json.dumps({"inputText": text})
 
@@ -61,7 +60,7 @@ def get_embedding_from_bedrock(text: str) -> list[float]:
 # 하이브리드 검색을 위한 질의 분리 함수
 def split_query_for_hybrid_search(query: str) -> dict:
     """
-    Claude 3 Opus를 이용해 질의를 정형(SQL)과 비정형(임베딩)으로 분리합니다.
+    Claude 4.1 Opus를 이용해 질의를 정형(SQL)과 비정형(임베딩)으로 분리합니다.
     """
     client = get_bedrock_client()
     if not client:
@@ -86,7 +85,7 @@ def split_query_for_hybrid_search(query: str) -> dict:
     """
     try:
         response = client.invoke_model(
-            modelId="anthropic.claude-3-opus-20240229-v1:0",
+            modelId="anthropic.claude-opus-4-1-20250805-v1:0",
             accept="application/json",
             contentType="application/json",
             body=json.dumps({
