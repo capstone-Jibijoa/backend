@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS panels_master (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP  -- 수정 시각
 );
 """
+
 # panel_vectors 테이블은 Kure 임베딩 벡터를 저장하며, panels_master 테이블과 외래 키로 연결됩니다.
 CREATE_PANEL_VECTORS_TABLE = """
 -- pgvector 확장을 사용하기 위해 데이터베이스에 설치 필요
