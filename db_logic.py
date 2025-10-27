@@ -15,7 +15,7 @@ load_dotenv()
 
 def get_db_connection():
     """데이터베이스에 연결하고 연결 객체를 반환합니다."""
-    # (기존 get_db_connection 함수는 변경 없음)
+
     try:
         conn = psycopg2.connect(
             host=os.getenv("DB_HOST"),
@@ -30,7 +30,7 @@ def get_db_connection():
 
 def create_tables():
     """데이터베이스에 필요한 모든 테이블을 생성합니다."""
-    # (기존 create_tables 함수는 변경 없음)
+    
     conn = None
     try:
         conn = get_db_connection()
