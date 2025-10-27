@@ -23,7 +23,7 @@ CREATE_PANEL_VECTORS_TABLE = """
 
 CREATE TABLE IF NOT EXISTS panel_vectors (
     uid INTEGER PRIMARY KEY,
-    embedding VECTOR(N), -- Kure 임베딩 벡터 (N은 실제 차원)
+    embedding VECTOR(1024), -- Kure 임베딩 벡터 (N은 실제 차원)
     FOREIGN KEY (uid) REFERENCES panels_master(uid) ON DELETE CASCADE
 );
 """

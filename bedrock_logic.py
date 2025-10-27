@@ -15,7 +15,7 @@ try:
     # KURE-v1 모델 로드 (Hugging Face Hub 경로 사용)
     # 모델 로딩은 시간이 걸리므로, 프로그램 시작 시 단 한 번만 수행됩니다.
     KURE_MODEL = SentenceTransformer("nlpai-lab/KURE-v1") 
-    print("KURE 임베딩 모델이 성공적으로 로드되었습니다.")
+    print("KURE 임베딩 모델 로드 완료! (다음은 Bedrock 호출 전입니다)")
 except Exception as e:
     KURE_MODEL = None
     print(f"KURE 임베딩 모델 로드 실패: {e}")
@@ -64,6 +64,7 @@ def split_query_for_hybrid_search(query: str) -> dict:
     Claude 4.1 Opus를 이용해 질의를 정형(Structured Filter)과 비정형(Semantic Keyword)으로 분리합니다.
     """
     client = get_bedrock_client() # get_bedrock_client 함수는 파일 상단에 정의되어 있어야 합니다.
+    print("Bedrock 클라이언트 생성 완료! (다음은 API 호출 전입니다)")
     if not client:
         raise HTTPException(status_code=500, detail="Bedrock 클라이언트 생성 실패")
 
@@ -193,7 +194,7 @@ if __name__ == "__main__":
         print(f"KURE 임베딩 테스트 실패: {e.detail}")
 
     # 질의 분리 및 통합 함수 테스트
-    test_text_split = "서울 강남구 근처에서 점심 먹기 좋은 한식집 추천해줘"
+    test_text_split = "IT 종사자, 커피를 자주 마시는 사람"
     try:
         processed_query = process_hybrid_query(test_text_split)
         print("질의 처리 함수가 성공적으로 완료되었습니다!")

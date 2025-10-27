@@ -44,3 +44,10 @@ main.py ─────┐
             ├──> bedrock_logic.py
             └──> db_logic.py ─────> spl_queries.py
 이 구조는 각 모듈의 역할을 명확히 분리하고, 유지보수 및 확장성을 높이는 데 기여합니다.
+
+### 가상환경 관련 설정
+활성화 => .\venv\Scripts\activate
+비활성화 => deactivate
+
+### API 서버 실행
+uvicorn main:app --reload
