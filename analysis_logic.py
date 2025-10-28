@@ -14,7 +14,7 @@ except Exception as e:
 # 프롬프트 생성 함수
 def build_opus_prompt(user_query: str, search_results: list) -> str:
     """
-    Claude 3 Opus 4.1 모델용 프롬프트 생성
+    Claude 3 Sonnet 모델용 프롬프트 생성
     - 설문데이터의 구조적 특징을 반영한 최적화 버전
     """
     prompt = f"""
@@ -97,7 +97,7 @@ def build_opus_prompt(user_query: str, search_results: list) -> str:
 # Bedrock Opus 4.1 모델 호출 함수
 def analyze_search_results(user_query: str, search_results: list):
     """
-    Claude 3 Opus 4.1 모델을 호출하여
+    Claude 3 Sonnet 모델을 호출하여
     검색 결과를 요약 및 시각화용 데이터로 구조화.
     """
     global bedrock
