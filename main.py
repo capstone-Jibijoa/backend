@@ -123,3 +123,25 @@ async def split_query(request: QueryRequest):
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"질의 분리 실패: {str(e)}")
+    
+# ----------------------------------------------------
+# 🌟 요청 처리 엔드포인트 정의
+# ----------------------------------------------------
+# 예시: 하이브리드 검색 쿼리를 처리하는 엔드포인트
+@app.post("/process_query")
+async def handle_query(query: str):
+    try:
+        # 이전에 작성하신 process_hybrid_query 함수 호출
+        result = process_hybrid_query(query) 
+        return {"status": "success", "data": result}
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"서버 내부 오류: {e}")
+
+# ----------------------------------------------------
+# 🌟 루트 경로 '/' 정의 (선택 사항이지만, 404를 없애기 위해 권장)
+# ----------------------------------------------------
+@app.get("/")
+def read_root():
+    return {"Hello": "Welcome to the Hybrid Search API"}

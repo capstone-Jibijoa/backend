@@ -1,12 +1,9 @@
 import os
 import json
 import boto3
-from dotenv import load_dotenv
 from fastapi import HTTPException
+from botocore.exceptions import ClientError
 from sentence_transformers import SentenceTransformer # sentence-transformers 라이브러리 추가
-
-# .env 파일에서 환경 변수를 불러옵니다.
-load_dotenv()
 
 # =======================================================
 # 1. KURE 임베딩 모델을 모듈 수준에서 한 번만 초기화한다.
@@ -27,12 +24,7 @@ def get_bedrock_client():
     AWS Bedrock 클라이언트를 생성하고 반환합니다.
     """
     try:
-        client = boto3.client(
-            "bedrock-runtime",
-            region_name=os.getenv("AWS_REGION"),  # .env의 AWS_REGION 환경 변수 사용
-            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
-        )
+        client = boto3.client("bedrock-runtime", region_name="us-east-1")
         return client
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bedrock 클라이언트 생성 실패: {e}")
@@ -61,7 +53,7 @@ def get_kure_embedding(text: str) -> list[float]:
 # 하이브리드 검색을 위한 질의 분리 함수
 def split_query_for_hybrid_search(query: str) -> dict:
     """
-    Claude 4.1 Opus를 이용해 질의를 정형(Structured Filter)과 비정형(Semantic Keyword)으로 분리합니다.
+    Claude Sonnet를 이용해 질의를 정형(Structured Filter)과 비정형(Semantic Keyword)으로 분리합니다.
     """
     client = get_bedrock_client() # get_bedrock_client 함수는 파일 상단에 정의되어 있어야 합니다.
     print("Bedrock 클라이언트 생성 완료! (다음은 API 호출 전입니다)")
@@ -112,14 +104,15 @@ def split_query_for_hybrid_search(query: str) -> dict:
     
     try:
         response = client.invoke_model(
-            modelId="anthropic.claude-opus-4-1-20250805-v1:0",
+            modelId="anthropic.claude-3-sonnet-20240229-v1:0",
             accept="application/json",
             contentType="application/json",
             body=json.dumps({
+                "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 800,
-                "temperature": 0.1, # 안정적인 JSON 출력을 위해 온도를 낮춤
+                "temperature": 0.1,
+                "system": system_prompt,  # <--- 최상위 system 파라미터로 수정
                 "messages": [
-                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ]
             })
