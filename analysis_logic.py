@@ -1,35 +1,61 @@
 import json
-import boto3
-from botocore.exceptions import ClientError
-from flask import Flask, request, jsonify 
-from flask_cors import CORS
+import os
+from langchain_anthropic import ChatAnthropic
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from pydantic import BaseModel, Field, conlist 
+from typing import List, Dict, Any
 
-app = Flask(__name__)
-CORS(app)
+# 1. JSON 출력 구조 정의 (Pydantic Schema)
+# 기존 코드와 동일
+# 시각화 데이터 항목의 Pydantic 모델
+class ChartDataEntry(BaseModel):
+    label: str = Field(description="차트 데이터의 레이블 (예: '결혼 여부')")
+    values: dict = Field(description="각 카테고리별 값의 딕셔너리 (예: {'기혼': 100, '미혼': 0})")
 
-# Bedrock 클라이언트 생성
+# 개별 분석 차트 모델
+class AnalysisChart(BaseModel):
+    topic: str = Field(description="분석 주제 (한글 문장)")
+    description: str = Field(description="차트 분석 요약 설명 (1~2줄)")
+    ratio: str = Field(description="주요 비율 (예: '100.0%')")
+    chart_data: conlist(ChartDataEntry, min_length=1, max_length=1)
+
+# 최종 JSON 출력 구조 모델
+class FinalAnalysisOutput(BaseModel):
+    main_summary: str = Field(description="검색 결과에 대한 포괄적인 요약 (2~3줄)")
+    query_focused_chart: AnalysisChart = Field(description="검색 질의 특징 분석 차트")
+    related_topic_chart: AnalysisChart = Field(description="검색 결과 연관 주제 분석 차트")
+    high_ratio_charts: conlist(AnalysisChart, min_length=3, max_length=3) # 차트 3개
+
+# 2. 초기화 및 설정 (Claude API 사용)
+
+# LangChain LLM 객체와 JSON 파서 초기화
 try:
-    bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-except Exception as e:
-    # 환경 변수 누락 등 초기 에러 발생 시 처리
-    print("Boto3 클라이언트 초기화 실패: 환경 변수를 확인하세요.", e)
-    # 테스트 종료를 위해 임시로 설정
-    bedrock = None
+    # 환경 변수 ANTHROPIC_API_KEY를 자동으로 사용합니다. 
+    # 모델명은 Claude 3 Sonnet의 API 식별자인 "claude-opus-4-1"를 사용합니다.
+    llm = ChatAnthropic(
+        model="claude-opus-4-1",
+        temperature=0.4,
+        # api_key=os.environ.get("ANTHROPIC_API_KEY") # 환경 변수가 아닌 경우 직접 전달 가능
+    )
+    
+    # JSON 출력 파서 초기화 (Pydantic 모델 기반)
+    parser = JsonOutputParser(pydantic_object=FinalAnalysisOutput)
 
-# 프롬프트 생성 함수
-def build_opus_prompt(user_query: str, search_results: list) -> str:
-    """
-    Claude 3 Sonnet 모델용 프롬프트 생성
-    - 설문데이터의 구조적 특징을 반영한 최적화 버전
-    """
-    prompt = f"""
+except Exception as e:
+    # Anthropic API 키 누락 등으로 초기화 실패 시 처리
+    print("LangChain Claude API LLM 초기화 실패: ANTHROPIC_API_KEY를 확인하세요.", e)
+    llm = None
+    parser = None
+
+PROMPT_TEMPLATE = """
 당신은 데이터 분석가이자 통계 시각화 전문가입니다.
 다음은 사용자의 자연어 질의와 그에 해당하는 설문 데이터입니다.
 
-### [사용자 질의]
+[사용자 질의]
 "{user_query}"
 
-### [데이터 샘플] (최대 150명)
+[데이터 샘플] (최대 150명)
 아래 JSON 배열은 특정 주제에 맞는 응답자들의 설문 결과입니다.
 각 항목은 개인 응답자 하나를 의미하며, 필드는 다음과 같습니다:
 - gender: 성별 (예: 'M', 'F')
@@ -46,19 +72,19 @@ def build_opus_prompt(user_query: str, search_results: list) -> str:
 - car_ownership / car_manufacturer: 자동차 보유 여부 및 제조사
 - smoking_experience / drinking_experience: 흡연 및 음주 경험
 
-### 분석 목표
+분석 목표
 아래의 데이터를 분석하여 총 5개의 차트 데이터를 포함하는 JSON 형식으로 출력하세요.
 
-#### query_focused_chart (검색 질의 특징 분석 - 차트 1개)
+1. query_focused_chart (검색 질의 특징 분석 - 차트 1개)
 - 목적: 사용자의 질의에 포함된 가장 대표적인 인구통계학적 속성 1개 (예: 성별, 연령대, 결혼 여부 등)의 분포를 분석하고 시각화용 데이터(`chart_data`)를 생성하세요.
 
-#### ② related_topic_chart (검색 결과 연관 주제 분석 - 차트 1개)
+2. related_topic_chart (검색 결과 연관 주제 분석 - 차트 1개)
 - 목적: 검색 질의와 의미적으로 가장 연관된 주제 1개를 도출하고, 그 비율과 함께 시각화용 데이터(`chart_data`)를 생성하세요. (예: 40대 기혼 남성은 자녀 수와 관련이 깊음)
 
-#### ③ high_ratio_charts (우연히 높은 비율을 보이는 주제 분석 - 차트 3개)
+3. high_ratio_charts (우연히 높은 비율을 보이는 주제 분석 - 차트 3개)
 - 목적: 데이터 내에서 검색 질의에 명시되지 않았지만 높은 비율을 차지하거나 뚜렷한 패턴이 있는 속성 **3개**를 선정하고, 그 비율과 함께 시각화용 데이터(`chart_data`)를 생성하세요.
 
-### 최종 JSON 출력 구조
+최종 JSON 출력 구조
 반드시 다음 구조를 따르세요.
 
 ```json
@@ -104,111 +130,69 @@ def build_opus_prompt(user_query: str, search_results: list) -> str:
 - summary는 분석 리포트처럼 자연스럽게 작성.
 - chart_data는 프론트엔드에서 시각화 가능한 구조로 유지.
 - 주제명(topic)은 설문 항목명을 그대로 사용하지 말고, 의미를 가진 한글 문장으로 표현.
-
-### [데이터 샘플]
-{json.dumps(search_results[:150], ensure_ascii=False, indent=2)}
 """
-    return prompt
 
-# Bedrock Sonnet 3 모델 호출 함수
-def analyze_search_results(user_query: str, search_results: list):
-    """
-    Claude 3 Sonnet 모델을 호출하여
-    검색 결과를 요약 및 시각화용 데이터로 구조화.
-    """
-    global bedrock
-    if bedrock is None:
-        return {"error": "Bedrock 클라이언트가 초기화되지 않았습니다. 환경 변수를 확인하세요."}
-    
-    model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
-    prompt = build_opus_prompt(user_query, search_results)
+prompt_template = PromptTemplate(
+    template=PROMPT_TEMPLATE,
+    input_variables=["user_query", "search_results_json"],
+    partial_variables={"format_instructions": parser.get_format_instructions()},
+)
 
-    # Bedrock API 요청 바디 구성
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 1800,
-        "temperature": 0.4,  # 일관된 구조 출력
-        "messages": [
-            {"role": "user", "content": [{"type": "text", "text": prompt}]}
-        ]
-    }
+# --- 4. LangChain 분석 체인 함수 (이전 코드와 동일) ---
+
+def analyze_search_results_chain(user_query: str, search_results: List[Dict[str, Any]]):
+    """
+    LangChain 체인을 사용하여 Claude 3 Sonnet 모델을 호출하고 결과를 파싱합니다.
+    """
+    if llm is None or parser is None:
+        return {"error": "LLM/Parser가 초기화되지 않았습니다. 환경 설정을 확인하세요."}, 500
+
+    # 데이터 샘플 JSON 문자열 준비 (프롬프트 주입용)
+    search_results_json = json.dumps(search_results[:150], ensure_ascii=False, indent=2)
+
+    # LangChain Expression Language (LCEL) 체인 구성
+    chain = prompt_template | llm | parser
 
     try:
-        # Bedrock API 호출
-        response = bedrock.invoke_model(
-            modelId=model_id,
-            body=json.dumps(body),
-            contentType="application/json",
-            accept="application/json"
-        )
-
-        # 응답 파싱
-        result = json.loads(response["body"].read())
-        output_text = result.get("content", [])[0].get("text", "").strip()
-
-        # Claude가 JSON 포맷을 반환하도록 요청했으므로 변환
-        return json.loads(output_text)
-
-    except ClientError as e:
-        print("Bedrock 호출 실패:", e)
-        return {"error": str(e)}
-    except json.JSONDecodeError:
-        # 2. JSON 파싱 실패 시, 마크다운 코드를 제거하고 재시도
-        try:
-            # ```json과 ```을 제거하고 문자열 정리
-            clean_text = output_text.strip().lstrip('```json').rstrip('```').strip()
-            return json.loads(clean_text)
-        except json.JSONDecodeError:
-            print("JSON 파싱 실패. 원문 반환:")
-            return {"raw_output": output_text}
+        # 체인 실행
+        analysis_result = chain.invoke({
+            "user_query": user_query,
+            "search_results_json": search_results_json
+        })
         
+        # Pydantic 모델을 통과한 유효한 JSON 객체 반환
+        return analysis_result, 200
+
     except Exception as e:
-        print("예상치 못한 오류 발생:", e)
-        return {"error": str(e)}
+        print("LangChain 체인 실행 또는 JSON 파싱 오류:", e)
+        # LLM이 JSON이 아닌 다른 응답을 반환했거나 호출에 실패한 경우
+        return {"error": f"분석 실패 또는 LLM 응답 JSON 파싱 오류: {str(e)}"}, 500
     
-@app.route('/api/analyze', methods=['POST'])
-def analyze_data_endpoint():
-    """
-    프론트엔드로부터 user_query를 받아 분석 결과를 반환하는 API 엔드포인트
-    """
-    # 1. 요청 본문(body)에서 사용자 질의 추출
-    try:
-        data = request.get_json()
-        user_query = data.get('user_query', '')
-        if not user_query:
-            return jsonify({"error": "user_query is missing"}), 400
-    except Exception:
-        return jsonify({"error": "Invalid JSON format"}), 400
-
-    # 2. 실제 검색 로직 (임시로 Mock 데이터 사용)
-    MOCK_DATA_COUNT = 50
-    mock_search_results = [
-        {
-            "gender": "M", "birth_year": 1983, "region_major": "서울", "region_minor": "강남구",
-            "marital_status": "기혼" if i < 45 else "미혼", # 기혼 90%
-            "family_size": "3명" if i < 40 else "2명", # 3명 80%
-            "income_household_monthly": "월 700~799만원" if i < 35 else "월 400~499만원", # 700만원 이상 70%
-            "car_ownership": "있다",
-            "car_manufacturer": "Mercedes-Benz" if i < 30 else "BMW", # 벤츠 60%
-            # ... (분석에 필요한 다른 필드도 포함)
-        } for i in range(MOCK_DATA_COUNT)
-    ]
-    
-    # 3. Bedrock LLM 분석 함수 호출
-    analysis_result = analyze_search_results(user_query, mock_search_results)
-
-    # 4. 결과 반환
-    if analysis_result.get("error"):
-        return jsonify(analysis_result), 500
-    if analysis_result.get("raw_output"):
-        # JSON 파싱 실패 시, 원시 텍스트를 담아 프론트에 전달
-        return jsonify(analysis_result), 500
-        
-    return jsonify(analysis_result), 200
 
 if __name__ == "__main__":
-    # Flask 서버 실행
-    print("Starting Flask Server...")
-    # debug=True는 개발용이며, production 환경에서는 반드시 False로 설정해야 합니다.
-    # use_reloader=False를 사용하면 VS Code에서 디버깅 시 재로딩 문제를 방지할 수 있습니다.
-    app.run(port=8000, debug=True, use_reloader=False)
+    # 테스트용 사용자 질의
+    test_query = "서울에 거주하는 30대 여성의 가전제품 구매 의향에 대한 분석을 요청합니다."
+    
+    # 테스트용 Mock 검색 결과 데이터 (db_logic.py에서 넘어왔다고 가정)
+    test_search_results = [
+        {"gender": "F", "birth_year": 1993, "region_major": "서울", "marital_status": "기혼", "owned_electronics": ["TV", "건조기"]},
+        {"gender": "F", "birth_year": 1996, "region_major": "경기", "marital_status": "미혼", "owned_electronics": ["TV", "공기청정기"]},
+        {"gender": "M", "birth_year": 1990, "region_major": "서울", "marital_status": "기혼", "owned_electronics": ["냉장고", "에어컨"]},
+        # LLM 분석을 테스트하기 위해 충분한 수의 데이터를 넣어주세요.
+    ] * 5  # 데이터를 복제하여 15개로 늘림 (분석에 용이)
+
+    print("="*50)
+    print(f"** LLM 분석 함수 단독 테스트 시작 **")
+    print(f"** 테스트 쿼리: {test_query} **")
+    print("="*50)
+    
+    # 함수 직접 호출
+    analysis_result, status_code = analyze_search_results_chain(test_query, test_search_results)
+
+    if status_code == 200:
+        print("\nLLM 분석 및 JSON 파싱 성공 (Status 200)")
+        # 보기 쉽게 JSON 포맷으로 출력
+        print(json.dumps(analysis_result, indent=2, ensure_ascii=False))
+    else:
+        print(f"\nLLM 분석 또는 파싱 실패 (Status {status_code})")
+        print(analysis_result)
