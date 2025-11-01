@@ -52,7 +52,10 @@ def initialize_components():
         print(f"❌ LangChain 구성 요소 초기화 실패: {e}")
         return None, None
 
-VECTOR_STORE, EMBEDDINGS = initialize_components()
+# 💡 중요: 테스트 시 문제를 유발하는 전역 초기화 코드를 제거합니다.
+# 대신, 필요한 시점에 초기화를 지연시키는 방식을 사용합니다.
+VECTOR_STORE = None
+EMBEDDINGS = None
 
 # =======================================================
 # 2. LangChain 체인(Chain)의 각 단계를 구성하는 함수
@@ -116,6 +119,12 @@ def _get_final_data_from_postgres(documents: list[Document]) -> list[dict]:
 
 def create_langchain_hybrid_retriever_chain():
     """하이브리드 검색 로직을 수행하는 LangChain 체인을 생성합니다."""
+    global VECTOR_STORE, EMBEDDINGS # 💡 전역 변수를 사용하기 위해 선언
+
+    # 💡 VECTOR_STORE가 아직 초기화되지 않았다면 이 시점에서 초기화합니다.
+    if VECTOR_STORE is None:
+        VECTOR_STORE, EMBEDDINGS = initialize_components()
+
     if not VECTOR_STORE:
         raise RuntimeError("벡터 저장소가 초기화되지 않았습니다. 서버를 재시작하세요.")
 
@@ -138,8 +147,12 @@ def create_langchain_hybrid_retriever_chain():
             # 2. Qdrant 검색. search_kwargs를 동적으로 수정하여 필터 적용
             lambda x: retriever.get_relevant_documents(
                 x["question"],
-                filter={"must": [{"key": "uid", "match": {"any": x["uids"]}}]}
-            ) if x["uids"] else []
+                # 💡 중요: x["uids"]가 비어있으면 Qdrant 검색을 수행하지 않고 빈 리스트를 반환합니다.
+                # 이렇게 하지 않으면 필터 없이 전체 벡터 검색을 수행하게 됩니다.
+                search_kwargs={
+                    "filter": {"must": [{"key": "uid", "match": {"any": x["uids"]}}]}
+                }
+            ) if x["uids"] else [] # 👈 x["uids"]가 비어있으면 이 부분이 실행되어 빈 리스트가 반환됩니다.
         )
         | RunnableLambda(_get_final_data_from_postgres) # 3. 최종 데이터 조회
     )

@@ -1,5 +1,6 @@
 import json
 import os
+from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
@@ -7,6 +8,9 @@ from pydantic import BaseModel, Field, conlist
 from typing import List, Dict, Any
 
 # 1. JSON 출력 구조 정의 (Pydantic Schema)
+# .env 파일에서 환경 변수를 로드합니다.
+load_dotenv()
+
 # 기존 코드와 동일
 # 시각화 데이터 항목의 Pydantic 모델
 class ChartDataEntry(BaseModel):
@@ -34,7 +38,9 @@ try:
     # 환경 변수 ANTHROPIC_API_KEY를 자동으로 사용합니다. 
     # 모델명은 Claude 3 Sonnet의 API 식별자인 "claude-opus-4-1"를 사용합니다.
     llm = ChatAnthropic(
-        model="claude-opus-4-1",
+        #model="claude-opus-4-1",
+        # 💡 테스트 중에는 비용 효율적인 Haiku 모델 사용을 권장합니다.
+        model="claude-3-haiku-20240307",
         temperature=0.4,
         # api_key=os.environ.get("ANTHROPIC_API_KEY") # 환경 변수가 아닌 경우 직접 전달 가능
     )
@@ -147,13 +153,26 @@ def analyze_search_results_chain(user_query: str, search_results: List[Dict[str,
     if llm is None or parser is None:
         return {"error": "LLM/Parser가 초기화되지 않았습니다. 환경 설정을 확인하세요."}, 500
 
+    # 💡 최적화: 검색 결과가 없으면 LLM을 호출하지 않고, Pydantic 모델 형식에 맞는 빈 객체를 즉시 반환합니다.
+    if not search_results:
+        empty_chart = AnalysisChart(topic="", description="", ratio="", chart_data=[ChartDataEntry(label="", values={})])
+        empty_output = FinalAnalysisOutput(
+            main_summary="검색 결과가 없습니다. 다른 검색어를 시도해 보세요.",
+            query_focused_chart=empty_chart,
+            related_topic_chart=empty_chart,
+            high_ratio_charts=[empty_chart, empty_chart, empty_chart]
+        )
+        return empty_output, 200
+
     # 데이터 샘플 JSON 문자열 준비 (프롬프트 주입용)
     search_results_json = json.dumps(search_results[:150], ensure_ascii=False, indent=2)
 
-    # LangChain Expression Language (LCEL) 체인 구성
-    chain = prompt_template | llm | parser
-
+    from langchain_core.exceptions import OutputParserException
     try:
+        # 💡 중요: chain 객체 생성을 try 블록 안으로 이동합니다.
+        # 이렇게 해야 테스트에서 mocker.patch가 올바르게 동작합니다.
+        chain = prompt_template | llm | parser
+
         # 체인 실행
         analysis_result = chain.invoke({
             "user_query": user_query,
@@ -163,6 +182,10 @@ def analyze_search_results_chain(user_query: str, search_results: List[Dict[str,
         # Pydantic 모델을 통과한 유효한 JSON 객체 반환
         return analysis_result, 200
 
+    except OutputParserException as e:
+        print(f"LLM 응답 JSON 파싱 오류: {e}")
+        # LLM의 원본 출력을 포함하여 에러를 반환하면 디버깅에 용이합니다.
+        return {"error": "LLM 응답 JSON 파싱 오류", "raw_output": e.llm_output}, 500
     except Exception as e:
         print("LangChain 체인 실행 또는 JSON 파싱 오류:", e)
         # LLM이 JSON이 아닌 다른 응답을 반환했거나 호출에 실패한 경우

@@ -58,13 +58,13 @@ async def search_products(search_query: SearchQuery):
             raise HTTPException(status_code=500, detail="LangChain 기반 데이터베이스 검색에 실패했습니다.")
 
         # 4. 검색 결과 분석 (Analysis Logic)
-        analysis_report = analyze_search_results(query_text, search_results)
+        analysis_report, status_code = analyze_search_results(query_text, search_results)
         
         # 분석 실패 시 (LLM이 JSON 형식을 지키지 않았거나 오류 발생 시)
-        if analysis_report.get("error") or analysis_report.get("raw_output"):
+        if status_code != 200:
             log_search_query(query_text, len(search_results))
             # Bedrock API 호출 실패 또는 파싱 실패를 상세히 명시
-            raise HTTPException(status_code=500, detail="검색 결과 분석(LLM)에 실패했습니다. Bedrock API 응답 및 파싱 로직을 확인하세요.")
+            raise HTTPException(status_code=500, detail="검색 결과 분석(LLM)에 실패했습니다. API 응답 및 파싱 로직을 확인하세요.")
         
         # 5. 검색 로그 기록 (DB Logic)
         log_search_query(query_text, len(search_results))
