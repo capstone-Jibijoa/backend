@@ -4,15 +4,32 @@ import os
 import psycopg2
 from dotenv import load_dotenv
 import json
-
+from qdrant_client import QdrantClient, models
+from qdrant_client.models import PointStruct, VectorParams, Distance, NamedVector
+from qdrant_client.models import Filter, FieldCondition, MatchAny, ScoredPoint
 from spl_queries import (
     CREATE_PANELS_MASTER_TABLE, 
-    CREATE_PANEL_VECTORS_TABLE, 
     CREATE_SEARCH_LOG_TABLE
 )
 
 load_dotenv()
 
+# =======================================================
+# 0. Qdrant 클라이언트 초기화
+# =======================================================
+def get_qdrant_client():
+    """Qdrant 클라이언트를 생성하고 반환합니다."""
+    try:
+        # 환경 변수에서 Qdrant 호스트와 포트를 가져옵니다.
+        client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
+        print("Qdrant 클라이언트 연결 성공!")
+        return client
+    except Exception as e:
+        print(f"Qdrant 클라이언트 연결 실패: {e}")
+        return None
+# =======================================================
+# 1. DB 연결 및 테이블 생성 함수 (로직 유지)
+# =======================================================
 def get_db_connection():
     """데이터베이스에 연결하고 연결 객체를 반환합니다."""
 
@@ -37,7 +54,6 @@ def create_tables():
         if conn:
             cur = conn.cursor()
             cur.execute(CREATE_PANELS_MASTER_TABLE)
-            cur.execute(CREATE_PANEL_VECTORS_TABLE)
             cur.execute(CREATE_SEARCH_LOG_TABLE)
             conn.commit()
             print("테이블이 성공적으로 생성되었습니다.")
@@ -48,9 +64,9 @@ def create_tables():
         if conn:
             conn.close()
 
-# -----------------------------------------------------------
-# 헬퍼 함수: JSON 문자열 필터를 안전한 SQL WHERE 절로 변환합니다.
-# -----------------------------------------------------------
+# =======================================================
+# 2. 유틸리티 함수 (PostgreSQL WHERE 절 변환)
+# =======================================================
 def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, list]:
     """
     Claude로부터 받은 JSON 문자열 필터를 PostgreSQL JSONB WHERE 절과 
@@ -100,57 +116,9 @@ def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, 
     # 모든 조건을 AND로 연결하고 ' WHERE ' 구문 추가
     return " WHERE " + " AND ".join(conditions), params
 
-
-def query_database_with_hybrid_search(structured_condition_json_str: str, embedding_vector: list[float], top_k: int = 10):
-    """
-    정형 조건(JSON 문자열)과 임베딩 벡터를 모두 사용하여 하이브리드 검색을 수행합니다.
-    """
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-
-            # 1. JSON 필터를 안전한 SQL WHERE 절과 파라미터로 변환
-            where_clause, where_params = _build_jsonb_where_clause(structured_condition_json_str)
-            
-            # 2. 하이브리드 쿼리 템플릿 완성
-            vector_str = str(embedding_vector)
-            
-            # 최종 쿼리 문자열 구성 (WHERE 절 포함)
-            final_query = f"""
-                SELECT 
-                    master.uid, 
-                    master.ai_insights,
-                    1 - (vectors.embedding <=> %s) AS similarity
-                FROM 
-                    panels_master AS master
-                JOIN 
-                    panel_vectors AS vectors ON master.uid = vectors.uid
-                {where_clause}
-                ORDER BY similarity DESC 
-                LIMIT %s;
-            """
-            
-            # 3. 모든 파라미터를 하나의 튜플로 조합
-            # 순서: [벡터 문자열] + [WHERE 절 파라미터 (동적)] + [LIMIT 파라미터]
-            all_params = [vector_str] + where_params + [top_k]
-            
-            # 4. 쿼리 실행
-            cur.execute(final_query, tuple(all_params))
-            results = cur.fetchall()
-            cur.close()
-
-            # 결과를 딕셔너리 리스트로 변환하여 반환
-            return [{"uid": row[0], "ai_insights": row[1], "similarity": row[2]} for row in results]
-
-    except Exception as e:
-        print(f"하이브리드 검색 쿼리 실패: {e}")
-        return None
-    finally:
-        if conn:
-            conn.close()
-
+# =======================================================
+# 4. 검색 로그 기록 함수
+# =======================================================
 def log_search_query(query: str, results_count: int, user_uid: int = None):
     conn = None
     try:

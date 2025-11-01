@@ -1,0 +1,18 @@
+# FastAPI & Server
+fastapi
+uvicorn[standard]
+
+# AI & LLM
+anthropic
+langchain-anthropic # 👈 Anthropic 모델 추적을 위해 추가
+sentence-transformers
+langchain-core
+langsmith # 👈 LangSmith 클라이언트 추가
+
+# Databases
+qdrant-client
+psycopg2-binary
+
+# Utilities
+python-dotenv
+tqdm

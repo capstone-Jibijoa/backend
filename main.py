@@ -2,9 +2,11 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 # 각 모듈에서 필요한 함수들을 임포트합니다.
-from bedrock_logic import process_hybrid_query, split_query_for_hybrid_search
-from db_logic import log_search_query, query_database_with_hybrid_search
-from analysis_logic import analyze_search_results # 👈 최종 분석 로직 추가
+from hybrid_logic import split_query_for_hybrid_search # 👈 질의 분리 함수만 사용
+from db_logic import log_search_query # 👈 로그 기록 함수만 사용
+from analysis_logic import analyze_search_results
+# ⭐️ LangChain 기반 검색 로직을 임포트합니다.
+from langchain_search_logic import langchain_hybrid_chain
 
 # FastAPI 애플리케이션 초기화
 app = FastAPI(title="Hybrid Search & Analysis API")
@@ -37,27 +39,25 @@ async def search_products(search_query: SearchQuery):
     query_text = search_query.query
     
     try:
-        # 1. 질의 분리 및 임베딩 벡터 생성 (Bedrock Logic)
-        processed_query_data = process_hybrid_query(query_text)
+        # 1. 질의 분리 (hybrid_logic)
+        # LangChain 체인이 내부적으로 임베딩을 처리하므로, 질의 분리만 수행합니다.
+        split_result = split_query_for_hybrid_search(query_text)
         
-        # 2. 정형 조건과 임베딩 벡터 추출
-        structured_condition = processed_query_data["structured_condition"]
-        embedding_vector = processed_query_data["embedding_vector"]
+        # 2. LangChain 체인에 전달할 입력 데이터 구성
+        chain_input = {
+            "structured": split_result["structured_condition"],
+            "semantic": split_result["semantic_condition"]
+        }
 
-        # 3. 하이브리드 검색 실행 (DB Logic)
-        # top_k=150으로 설정하여 분석에 필요한 최대 데이터를 가져옵니다.
-        search_results = query_database_with_hybrid_search(
-            structured_condition,
-            embedding_vector,
-            top_k=150
-        )
+        # 3. LangChain 체인 실행 (invoke)
+        # ⭐️ 이 한 줄이 기존의 수동 하이브리드 검색 로직을 대체합니다.
+        search_results = langchain_hybrid_chain.invoke(chain_input)
 
         if search_results is None:
-            # DB 연결 실패 시, 이미 db_logic에서 에러 메시지가 출력되었을 수 있습니다.
-            raise HTTPException(status_code=500, detail="데이터베이스 검색에 실패했습니다. DB 연결 또는 쿼리 실패를 확인하세요.")
+            # 체인 실행 중 오류가 발생한 경우 (내부 함수에서 None을 반환)
+            raise HTTPException(status_code=500, detail="LangChain 기반 데이터베이스 검색에 실패했습니다.")
 
         # 4. 검색 결과 분석 (Analysis Logic)
-        # 검색된 데이터를 Claude 3 Opus 모델에게 전달하여 분석 보고서를 생성합니다.
         analysis_report = analyze_search_results(query_text, search_results)
         
         # 분석 실패 시 (LLM이 JSON 형식을 지키지 않았거나 오류 발생 시)
@@ -124,21 +124,6 @@ async def split_query(request: QueryRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"질의 분리 실패: {str(e)}")
     
-# ----------------------------------------------------
-# 🌟 요청 처리 엔드포인트 정의
-# ----------------------------------------------------
-# 예시: 하이브리드 검색 쿼리를 처리하는 엔드포인트
-@app.post("/process_query")
-async def handle_query(query: str):
-    try:
-        # 이전에 작성하신 process_hybrid_query 함수 호출
-        result = process_hybrid_query(query) 
-        return {"status": "success", "data": result}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"서버 내부 오류: {e}")
-
 # ----------------------------------------------------
 # 🌟 루트 경로 '/' 정의 (선택 사항이지만, 404를 없애기 위해 권장)
 # ----------------------------------------------------
