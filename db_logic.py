@@ -7,10 +7,6 @@ import json
 from qdrant_client import QdrantClient, models
 from qdrant_client.models import PointStruct, VectorParams, Distance, NamedVector
 from qdrant_client.models import Filter, FieldCondition, MatchAny, ScoredPoint
-from spl_queries import (
-    CREATE_PANELS_MASTER_TABLE, 
-    CREATE_SEARCH_LOG_TABLE
-)
 
 load_dotenv()
 
@@ -45,25 +41,6 @@ def get_db_connection():
         print(f"데이터베이스 연결 실패: {e}")
         return None
 
-def create_tables():
-    """데이터베이스에 필요한 모든 테이블을 생성합니다."""
-    
-    conn = None
-    try:
-        conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            cur.execute(CREATE_PANELS_MASTER_TABLE)
-            cur.execute(CREATE_SEARCH_LOG_TABLE)
-            conn.commit()
-            print("테이블이 성공적으로 생성되었습니다.")
-            cur.close()
-    except Exception as e:
-        print(f"테이블 생성 실패: {e}")
-    finally:
-        if conn:
-            conn.close()
-
 # =======================================================
 # 2. 유틸리티 함수 (PostgreSQL WHERE 절 변환)
 # =======================================================
@@ -89,7 +66,7 @@ def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, 
             continue
 
         # 모든 필터는 panels_master의 ai_insights JSONB 컬럼을 참조합니다.
-        jsonb_access = f"master.ai_insights->>'{key}'"
+        jsonb_access = f"ai_insights->>'{key}'"
 
         if operator == "EQ":
             conditions.append(f"{jsonb_access} = %s")

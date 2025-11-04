@@ -1,12 +1,10 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-# 각 모듈에서 필요한 함수들을 임포트합니다.
 from hybrid_logic import split_query_for_hybrid_search # 👈 질의 분리 함수만 사용
 from db_logic import log_search_query # 👈 로그 기록 함수만 사용
-from analysis_logic import analyze_search_results
-# ⭐️ LangChain 기반 검색 로직을 임포트합니다.
-from langchain_search_logic import langchain_hybrid_chain
+from analysis_logic import analyze_search_results_chain # 👈 올바른 파일과 함수 이름으로 수정
+from langchain_search_logic import get_langchain_hybrid_chain, force_reload_langchain_components 
 
 # FastAPI 애플리케이션 초기화
 app = FastAPI(title="Hybrid Search & Analysis API")
@@ -27,6 +25,23 @@ class QueryResponse(BaseModel):
     structured_condition: str
     semantic_condition: str
 
+
+# =======================================================
+# 관리자용 '엔진 교체' API
+# =======================================================
+@app.post("/admin/reload-langchain")
+async def reload_components():
+    """
+    관리자가 이 API를 호출하면, 서버 재시작 없이
+    LangChain의 전역 변수(VECTOR_STORE, 체인)가 새로고침됩니다.
+    """
+    try:
+        # 1단계에서 만든 '엔진 교체' 함수를 호출합니다.
+        result = force_reload_langchain_components()
+        return result
+    except Exception as e:
+        print(f"❌ LangChain 리로드 중 심각한 오류 발생: {e}")
+        raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
 
 # ====================================================================
 # 1. 메인 검색 및 분석 API 엔드포인트
@@ -49,16 +64,22 @@ async def search_products(search_query: SearchQuery):
             "semantic": split_result["semantic_condition"]
         }
 
+        # ================= [ 🐞 디버깅 로그 추가 ] =================
+        print(f"🔍 DEBUG [main.py]: 원본 질문: {query_text}")
+        print(f"🔍 DEBUG [main.py]: 체인 입력: {chain_input}")
+        # =======================================================
+
         # 3. LangChain 체인 실행 (invoke)
         # ⭐️ 이 한 줄이 기존의 수동 하이브리드 검색 로직을 대체합니다.
-        search_results = langchain_hybrid_chain.invoke(chain_input)
+        langchain_hybrid_chain = get_langchain_hybrid_chain() # 함수를 호출하여 체인 객체를 얻습니다.
+        search_results = langchain_hybrid_chain.invoke(chain_input) 
 
         if search_results is None:
             # 체인 실행 중 오류가 발생한 경우 (내부 함수에서 None을 반환)
             raise HTTPException(status_code=500, detail="LangChain 기반 데이터베이스 검색에 실패했습니다.")
 
         # 4. 검색 결과 분석 (Analysis Logic)
-        analysis_report, status_code = analyze_search_results(query_text, search_results)
+        analysis_report, status_code = analyze_search_results_chain(query_text, search_results)
         
         # 분석 실패 시 (LLM이 JSON 형식을 지키지 않았거나 오류 발생 시)
         if status_code != 200:
