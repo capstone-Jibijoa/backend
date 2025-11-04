@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 # LangChain 및 관련 라이브러리 임포트
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import QdrantVectorStore
+from langchain_qdrant import Qdrant
 from langchain_core.runnables import RunnableLambda
 from langchain_core.documents import Document
 
@@ -36,15 +36,15 @@ def initialize_components():
         # 2. Qdrant 벡터 저장소 초기화
         qdrant_client = get_qdrant_client()
         if not qdrant_client:
-            raise ConnectionError("Qdrant 클라이언트 연결에 실패했습니다.")
+            raise ConnectionError("❌ Qdrant 클라이언트 연결 실패")
         
         collection_name = os.getenv("QDRANT_COLLECTION_NAME", "panels_collection")
         
         # Qdrant를 LangChain의 VectorStore 인터페이스로 래핑합니다.
-        vector_store = QdrantVectorStore(
+        vector_store = Qdrant(
             client=qdrant_client,
             collection_name=collection_name,
-            embedding=embeddings,
+            embeddings=embeddings,
             content_payload_key="text",
             # metadata_payload_key="uid"
         )

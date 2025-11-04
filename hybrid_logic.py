@@ -12,9 +12,14 @@ load_dotenv()
 # 1. claude 모델을 모듈 수준에서 한 번만 초기화한다.
 # =======================================================
 try:
-    # 💡 최적화: 질의 분리는 비교적 간단한 작업이므로 더 빠르고 저렴한 Sonnet 모델로 변경합니다.
-    # model="claude-4-sonnet-20250514"
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-3-haiku-20240307", temperature=0.1)
+
+    my_api_key = os.getenv("ANTHROPIC_API_KEY")
+
+    CLAUDE_CLIENT = ChatAnthropic(
+        model="claude-opus-4-1",
+        temperature=0.4,
+        api_key=my_api_key
+    )
 except Exception as e:
     CLAUDE_CLIENT = None
     print(f"Anthropic 클라이언트 생성 실패: {e}") # 모델과 동일한 패턴으로 유지
@@ -39,9 +44,23 @@ def split_query_for_hybrid_search(query: str) -> dict:
 
 [핵심 규칙]
 1. **정형 조건 (filters)**: '지역', '성별', '나이', '소득', '직무' 등 명확한 속성 필터는 'filters' 배열에 객체 형태로 변환하세요.
-   - **컬럼 목록 확정**: 다음 확정된 컬럼 목록만 사용하세요. 질문에 직접 관련된 정보만 필터링하고, 나머지 컬럼은 무시하세요:
-     **region_major, gender, birth_year, marital_status, education_level, job_duty, income_personal_monthly, car_ownership, drinking_experience, smoking_experience**
-   - **연산자**: EQ(동일), BETWEEN(범위), GT(초과), LT(미만)만 사용하세요.
+    - 각 필터 객체는 다음과 같은 키-값 쌍을 가져야 합니다:
+
+[데이터 샘플] (최대 150명)
+- gender: 성별 (예: 'M', 'F')
+- birth_year: 출생연도
+- region_major / region_minor: 거주 지역 (예: '경기', '화성시')
+- marital_status: 결혼 여부
+- children_count: 자녀 수
+- family_size: 가족 구성 인원
+- education_level: 최종 학력
+- job_title_raw / job_duty: 직종 및 직무
+- income_personal_monthly / income_household_monthly: 개인 및 가구 월소득
+- owned_electronics: 보유 가전제품 리스트
+- phone_brand / phone_model_raw: 휴대폰 제조사 및 모델
+- car_ownership / car_manufacturer: 자동차 보유 여부 및 제조사
+- smoking_experience / drinking_experience: 흡연 및 음주 경험
+
    - **값 표준화**: 
      a. **나이 변환**: 나이(예: 30~40대)는 **현재 연도({current_year}년)**를 기준으로 출생 연도(birth_year)의 **BETWEEN** 범위(예: [{current_year}-49, {current_year}-30])로 변환하세요.
      b. **성별 변환**: '남자', '여자'만 사용하세요.

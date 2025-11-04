@@ -38,9 +38,7 @@ try:
     # 환경 변수 ANTHROPIC_API_KEY를 자동으로 사용합니다. 
     # 모델명은 Claude 3 Sonnet의 API 식별자인 "claude-opus-4-1"를 사용합니다.
     llm = ChatAnthropic(
-        #model="claude-opus-4-1",
-        # 💡 테스트 중에는 비용 효율적인 Haiku 모델 사용을 권장합니다.
-        model="claude-3-haiku-20240307",
+        model="claude-opus-4-1",
         temperature=0.4,
         # api_key=os.environ.get("ANTHROPIC_API_KEY") # 환경 변수가 아닌 경우 직접 전달 가능
     )
