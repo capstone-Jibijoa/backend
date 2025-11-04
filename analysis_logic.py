@@ -162,7 +162,7 @@ def analyze_search_results_chain(user_query: str, search_results: List[Dict[str,
             related_topic_chart=empty_chart,
             high_ratio_charts=[empty_chart, empty_chart, empty_chart]
         )
-        return empty_output, 200
+        return empty_output.model_dump(), 200 # 💡 .dict() 또는 .model_dump()로 딕셔너리 변환
 
     # 데이터 샘플 JSON 문자열 준비 (프롬프트 주입용)
     search_results_json = json.dumps(search_results[:150], ensure_ascii=False, indent=2)
