@@ -66,7 +66,7 @@ def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, 
             continue
 
         # 모든 필터는 panels_master의 ai_insights JSONB 컬럼을 참조합니다.
-        jsonb_access = f"ai_insights->>'{key}'"
+        jsonb_access = f"structured_data->>'{key}'"
 
         if operator == "EQ":
             conditions.append(f"{jsonb_access} = %s")
