@@ -46,7 +46,6 @@ def initialize_components():
             collection_name=collection_name,
             embeddings=embeddings,
             content_payload_key="text",
-            # metadata_payload_key="uid"
         )
         print(f"✅ LangChain: Qdrant 벡터 저장소 ('{collection_name}') 준비 완료")
         
@@ -68,20 +67,17 @@ def _initialize_langchain_components():
     global VECTOR_STORE, EMBEDDINGS, _chain_cache
     
     print("🔄 LangChain 구성 요소 초기화를 시작합니다...")
-    # 1. '가솔린 엔진'(새 객체)을 만듭니다.
     VECTOR_STORE, EMBEDDINGS = initialize_components()
     
     if not VECTOR_STORE:
         _chain_cache = None # 실패 시 캐시 비움
         raise RuntimeError("벡터 저장소가 초기화되지 않았습니다.")
     
-    # 2. 새 엔진을 사용하는 '새 체인'을 만듭니다.
     _chain_cache = create_langchain_hybrid_retriever_chain()
     print("✅ LangChain 체인 캐시 생성 완료.")
 
 def get_langchain_hybrid_chain():
     """
-    [수정]
     체인 객체를 반환합니다. 필요할 때만 초기화를 호출합니다.
     """
     global _chain_cache
@@ -93,7 +89,6 @@ def force_reload_langchain_components():
     """
     [핵심 로직]
     서버 재시작 없이 LangChain 구성 요소를 강제로 다시 로드하는 함수.
-    이것이 우리가 만들 '엔진 교체 버튼'입니다.
     """
     print("🔥 LangChain 구성 요소 강제 리로드를 요청받았습니다.")
     
@@ -131,62 +126,67 @@ def _get_filtered_uids_from_postgres(structured_condition: str) -> list[int]:
         if pg_conn: 
             pg_conn.close()
 
-def _search_qdrant_with_filter(x: dict) -> list[Document]:
-    """[체인 2단계] Qdrant에서 필터링된 유사도 검색을 수행합니다."""
-    global VECTOR_STORE
-    
-    if not x["uids"]:
-        print("LANGCHAIN_CHAIN: 필터링된 UID가 없어 Qdrant 검색을 건너뜁니다.")
-        return []
-    
-    try:
-        # Qdrant 필터 생성
-        qdrant_filter = Filter(
-            must=[
-                FieldCondition(
-                    key="uid",
-                    match=MatchAny(any=x["uids"])
-                )
-            ]
-        )
+def _search_qdrant_or_pass_through(x: dict) -> list[Document]:
+    """
+    시맨틱 검색어(x["question"])가 있으면 Qdrant 검색을 수행하고,
+    없으면 PostgreSQL에서 받은 UID를 metadata로 하는
+    가상 Document 리스트를 생성하여 3단계로 바로 전달합니다.
+    """
+    semantic_query = x.get("question", "").strip()
+    uids = x.get("uids", [])
 
-        # 👈 [수정] k 값을 필터링된 UID의 총 개수로 설정
-        search_k = len(x["uids"])
-        
-        # 💡 안정성을 위해 k가 너무 작지 않도록 최소값 설정 (예: 150)
-        # 6018개가 필터링되었다면, k는 6018이 됩니다.
-        k_to_search = max(150, search_k)
-        
-        print(f"🔍 DEBUG: Qdrant k={k_to_search}로 검색 (필터된 UID 개수: {search_k})")
-
-        # ================= [ 🐞 디버깅 로그 추가 ] =================
-        print(f"🔍 DEBUG: Qdrant 검색 질문: {x['question']}")
-        print(f"🔍 DEBUG: Qdrant 필터 UID 개수: {len(x['uids'])}")
-        if len(x['uids']) < 10: # UID가 적을 때만 내용 출력
-             print(f"🔍 DEBUG: Qdrant 필터 UID 목록: {x['uids']}")
-        # =======================================================
-        
-        # 유사도 검색 수행
-        results = VECTOR_STORE.similarity_search(
-            query=x["question"],
-            k=k_to_search,
-            filter=qdrant_filter
-        )
-        
-        print(f"LANGCHAIN_CHAIN: Qdrant 검색 결과 {len(results)}개 발견.")
-        
-        # ================= [ 🐞 디버깅 로그 추가 ] =================
-        if results:
-            print(f"🔍 DEBUG: Qdrant 첫 번째 결과 metadata: {results[0].metadata}")
-        # =======================================================
-        
-        return results
-        
-    except Exception as e:
-        print(f"LANGCHAIN_CHAIN: Qdrant 검색 중 오류: {e}")
-        import traceback
-        traceback.print_exc()
+    if not uids:
+        # 1단계(PostgreSQL)에서 아무것도 못 찾았으면 즉시 종료
+        print("LANGCHAIN_CHAIN: 필터링된 UID가 없어 2단계를 건너뜁니다.")
         return []
+
+    # --- 1. 시맨틱 검색어가 *있는* 경우 (기존 Qdrant 검색 로직) ---
+    if semantic_query:
+        print(f"LANGCHAIN_CHAIN: 시맨틱 검색어 '{semantic_query}'로 Qdrant 검색 수행...")
+        global VECTOR_STORE
+        try:
+            qdrant_filter = Filter(
+                must=[ FieldCondition(key="uid", match=MatchAny(any=uids)) ]
+            )
+            k_to_search = max(150, len(uids))
+            
+            print(f"🔍 DEBUG: Qdrant k={k_to_search}로 검색 (필터된 UID 개수: {len(uids)})")
+            print(f"🔍 DEBUG: Qdrant 검색 질문: {semantic_query}")
+            if len(uids) < 10:
+                 print(f"🔍 DEBUG: Qdrant 필터 UID 목록: {uids}")
+
+            results = VECTOR_STORE.similarity_search(
+                query=semantic_query,
+                k=k_to_search,
+                filter=qdrant_filter
+            )
+            print(f"LANGCHAIN_CHAIN: Qdrant 검색 결과 {len(results)}개 발견.")
+            return results
+            
+        except Exception as e:
+            print(f"LANGCHAIN_CHAIN: Qdrant 검색 중 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    # --- 2. 시맨틱 검색어가 *없는* 경우 ---
+    else:
+        print("LANGCHAIN_CHAIN: 시맨틱 검색어가 없습니다. Qdrant 검색(2단계)을 건너뜁니다.")
+        print("LANGCHAIN_CHAIN: PostgreSQL UID(1단계)를 3단계(최종 조회)로 바로 전달합니다.")
+        
+        # 3단계(_get_final_data_from_postgres)는 Document 리스트를 기대합니다.
+        # 따라서, 1단계에서 받은 UID 목록을 가상 Document 형식으로 변환하여 넘겨줍니다.
+        
+        virtual_documents = []
+        for uid in uids:
+            # metadata에 uid만 포함된 가상 Document 생성
+            virtual_documents.append(
+                Document(page_content="", metadata={"uid": uid})
+            )
+            
+        # 3단계 함수는 이 Document 리스트를 받아 metadata.uid를 추출하여
+        # 최종 DB 조회를 실행할 것입니다. 
+        return virtual_documents
 
 def _get_final_data_from_postgres(documents: list[Document]) -> list[dict]:
     """[체인 3단계] Qdrant 검색 결과(Document)에서 UID를 추출하여 최종 데이터를 조회합니다."""
@@ -260,8 +260,8 @@ def create_langchain_hybrid_retriever_chain():
             # 'semantic' 키로 들어온 입력을 'question'이라는 키로 그대로 통과
             "question": itemgetter("semantic")
         }
-        | RunnableLambda(_search_qdrant_with_filter)  # Qdrant 검색 (필터 적용)
-        | RunnableLambda(_get_final_data_from_postgres)  # 최종 데이터 조회
+        | RunnableLambda(_search_qdrant_or_pass_through) 
+        | RunnableLambda(_get_final_data_from_postgres)  # 3단계 함수는 그대로 유지
     )
     return chain
 

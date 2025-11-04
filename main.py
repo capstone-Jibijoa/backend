@@ -69,8 +69,7 @@ async def search_products(search_query: SearchQuery):
         print(f"🔍 DEBUG [main.py]: 체인 입력: {chain_input}")
         # =======================================================
 
-        # 3. LangChain 체인 실행 (invoke)
-        # ⭐️ 이 한 줄이 기존의 수동 하이브리드 검색 로직을 대체합니다.
+        # 2. LangChain 체인 실행 (invoke)
         langchain_hybrid_chain = get_langchain_hybrid_chain() # 함수를 호출하여 체인 객체를 얻습니다.
         search_results = langchain_hybrid_chain.invoke(chain_input) 
 
@@ -78,7 +77,7 @@ async def search_products(search_query: SearchQuery):
             # 체인 실행 중 오류가 발생한 경우 (내부 함수에서 None을 반환)
             raise HTTPException(status_code=500, detail="LangChain 기반 데이터베이스 검색에 실패했습니다.")
 
-        # 4. 검색 결과 분석 (Analysis Logic)
+        # 3. 검색 결과 분석 (Analysis Logic)
         analysis_report, status_code = analyze_search_results_chain(query_text, search_results)
         
         # 분석 실패 시 (LLM이 JSON 형식을 지키지 않았거나 오류 발생 시)
@@ -87,10 +86,10 @@ async def search_products(search_query: SearchQuery):
             # Bedrock API 호출 실패 또는 파싱 실패를 상세히 명시
             raise HTTPException(status_code=500, detail="검색 결과 분석(LLM)에 실패했습니다. API 응답 및 파싱 로직을 확인하세요.")
         
-        # 5. 검색 로그 기록 (DB Logic)
+        # 4. 검색 로그 기록 (DB Logic)
         log_search_query(query_text, len(search_results))
 
-        # 6. 최종 분석 결과를 JSON 형태로 반환
+        # 5. 최종 분석 결과를 JSON 형태로 반환
         return {
             "query": query_text,
             "results_count": len(search_results),
@@ -146,7 +145,7 @@ async def split_query(request: QueryRequest):
         raise HTTPException(status_code=500, detail=f"질의 분리 실패: {str(e)}")
     
 # ----------------------------------------------------
-# 🌟 루트 경로 '/' 정의 (선택 사항이지만, 404를 없애기 위해 권장)
+# 루트 경로 '/' 정의
 # ----------------------------------------------------
 @app.get("/")
 def read_root():
