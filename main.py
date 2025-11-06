@@ -1,152 +1,194 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from hybrid_logic import split_query_for_hybrid_search # 👈 질의 분리 함수만 사용
-from db_logic import log_search_query # 👈 로그 기록 함수만 사용
-from analysis_logic import analyze_search_results_chain # 👈 올바른 파일과 함수 이름으로 수정
-from langchain_search_logic import get_langchain_hybrid_chain, force_reload_langchain_components 
+from hybrid_logic import classify_query_keywords  # 키워드 분류 함수
+from search_logic import hybrid_search  # 통합 검색 함수
+from db_logic import log_search_query, get_db_connection
 
 # FastAPI 애플리케이션 초기화
-app = FastAPI(title="Hybrid Search & Analysis API")
+app = FastAPI(title="Multi-Table Hybrid Search API v2")
 
-# API 요청 및 응답 본문 모델 정의
+# ====================================================================
+# 요청/응답 모델
+# ====================================================================
 
 class SearchQuery(BaseModel):
     query: str
 
-class SearchLog(BaseModel):
+class SearchResponse(BaseModel):
     query: str
-    results_count: int
-
-class QueryRequest(BaseModel):
-    query: str
-
-class QueryResponse(BaseModel):
-    structured_condition: str
-    semantic_condition: str
-
-
-# =======================================================
-# 관리자용 '엔진 교체' API
-# =======================================================
-@app.post("/admin/reload-langchain")
-async def reload_components():
-    """
-    관리자가 이 API를 호출하면, 서버 재시작 없이
-    LangChain의 전역 변수(VECTOR_STORE, 체인)가 새로고침됩니다.
-    """
-    try:
-        # 1단계에서 만든 '엔진 교체' 함수를 호출합니다.
-        result = force_reload_langchain_components()
-        return result
-    except Exception as e:
-        print(f"❌ LangChain 리로드 중 심각한 오류 발생: {e}")
-        raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+    classification: dict
+    results: dict
+    final_pids: list[int]
+    summary: dict
 
 # ====================================================================
-# 1. 메인 검색 및 분석 API 엔드포인트
+# 1. 메인 검색 API
 # ====================================================================
-@app.post("/api/search")
-async def search_products(search_query: SearchQuery):
+
+@app.post("/api/search", response_model=SearchResponse)
+async def search_panels(search_query: SearchQuery):
     """
-    자연어 검색 요청을 처리하고 하이브리드 검색 결과를 분석하여 반환합니다.
+    자연어 질의를 받아 Welcome/QPoll 테이블에서 하이브리드 검색을 수행합니다.
+    
+    프로세스:
+    1. LLM이 질의를 Welcome(객관/주관)/QPoll 키워드로 분류
+    2. Welcome 객관식 → PostgreSQL 검색 (pid1)
+    3. Welcome 주관식 → Qdrant 임베딩 검색 (pid2)
+    4. QPoll → Qdrant 임베딩 검색 (pid3)
+    5. 교집합 계산 및 반환
     """
     query_text = search_query.query
     
     try:
-        # 1. 질의 분리 (hybrid_logic)
-        # LangChain 체인이 내부적으로 임베딩을 처리하므로, 질의 분리만 수행합니다.
-        split_result = split_query_for_hybrid_search(query_text)
+        print(f"\n{'='*70}")
+        print(f"🔍 검색 요청: {query_text}")
+        print(f"{'='*70}\n")
         
-        # 2. LangChain 체인에 전달할 입력 데이터 구성
-        chain_input = {
-            "structured": split_result["structured_condition"],
-            "semantic": split_result["semantic_condition"]
-        }
-
-        # ================= [ 🐞 디버깅 로그 추가 ] =================
-        print(f"🔍 DEBUG [main.py]: 원본 질문: {query_text}")
-        print(f"🔍 DEBUG [main.py]: 체인 입력: {chain_input}")
-        # =======================================================
-
-        # 2. LangChain 체인 실행 (invoke)
-        langchain_hybrid_chain = get_langchain_hybrid_chain() # 함수를 호출하여 체인 객체를 얻습니다.
-        search_results = langchain_hybrid_chain.invoke(chain_input) 
-
-        if search_results is None:
-            # 체인 실행 중 오류가 발생한 경우 (내부 함수에서 None을 반환)
-            raise HTTPException(status_code=500, detail="LangChain 기반 데이터베이스 검색에 실패했습니다.")
-
-        # 3. 검색 결과 분석 (Analysis Logic)
-        analysis_report, status_code = analyze_search_results_chain(query_text, search_results)
+        # 1단계: LLM 키워드 분류
+        print("📌 1단계: LLM 키워드 분류")
+        classification = classify_query_keywords(query_text)
         
-        # 분석 실패 시 (LLM이 JSON 형식을 지키지 않았거나 오류 발생 시)
-        if status_code != 200:
-            log_search_query(query_text, len(search_results))
-            # Bedrock API 호출 실패 또는 파싱 실패를 상세히 명시
-            raise HTTPException(status_code=500, detail="검색 결과 분석(LLM)에 실패했습니다. API 응답 및 파싱 로직을 확인하세요.")
+        # 2단계: 하이브리드 검색 수행
+        print("\n📌 2단계: 하이브리드 검색")
+        search_results = hybrid_search(classification)
         
-        # 4. 검색 로그 기록 (DB Logic)
-        log_search_query(query_text, len(search_results))
-
-        # 5. 최종 분석 결과를 JSON 형태로 반환
-        return {
+        # 3단계: 최종 PID 목록 추출 (교집합)
+        final_pids = list(search_results['intersection'])
+        
+        # 4단계: 검색 로그 기록
+        log_search_query(query_text, len(final_pids))
+        
+        # 5단계: 응답 구성
+        response = {
             "query": query_text,
-            "results_count": len(search_results),
-            "analysis_report": analysis_report,
+            "classification": classification,
+            "results": {
+                "welcome_objective_count": len(search_results['pid1']),
+                "welcome_subjective_count": len(search_results['pid2']),
+                "qpoll_count": len(search_results['pid3']),
+                "intersection_count": len(final_pids)
+            },
+            "final_pids": final_pids[:100],  # 상위 100개만 반환 (API 응답 크기 제한)
+            "summary": {
+                "total_candidates": len(final_pids),
+                "search_strategy": {
+                    "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
+                    "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
+                    "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+                }
+            }
         }
-
-    except HTTPException as e:
-        # FastAPI HTTPException은 그대로 다시 발생시킵니다.
-        raise e
-    except Exception as e:
-        # 기타 예상치 못한 예외 처리
-        print(f"하이브리드 검색 및 분석 통합 실패: {e}")
-        raise HTTPException(status_code=500, detail=f"하이브리드 검색 및 분석 통합 실패: {str(e)}")
-
-
-# ====================================================================
-# 2. 검색 로그 기록 엔드포인트
-# ====================================================================
-@app.post("/api/search/log")
-async def log_search(search_log: SearchLog):
-    """
-    사용자의 검색 활동을 데이터베이스에 기록합니다.
-    """
-    try:
-        log_id = log_search_query(search_log.query, search_log.results_count)
-        if log_id is None:
-            raise HTTPException(status_code=500, detail="검색 로그 기록에 실패했습니다.")
         
-        return {"message": "검색 로그가 성공적으로 기록되었습니다.", "log_id": log_id}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ====================================================================
-# 3. 질의 분리 디버깅 엔드포인트
-# ====================================================================
-@app.post("/split", response_model=QueryResponse)
-async def split_query(request: QueryRequest):
-    """
-    POST 요청으로 받은 자연어 쿼리를 정형 조건과 의미론적 조건으로 분리합니다. (디버깅용)
-    """
-    try:
-        # bedrock_logic.py에 있는 split_query_for_hybrid_search 함수 호출
-        result = split_query_for_hybrid_search(request.query)
-        return QueryResponse(
-            structured_condition=result["structured_condition"],
-            semantic_condition=result["semantic_condition"]
-        )
+        print(f"\n✅ 검색 완료: {len(final_pids)}명의 패널 발견")
+        
+        return response
+        
     except HTTPException as e:
         raise e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"질의 분리 실패: {str(e)}")
-    
-# ----------------------------------------------------
-# 루트 경로 '/' 정의
-# ----------------------------------------------------
+        print(f"❌ 검색 실패: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
+
+# ====================================================================
+# 2. 디버깅 API - 키워드 분류만 테스트
+# ====================================================================
+
+@app.post("/api/debug/classify")
+async def debug_classify(search_query: SearchQuery):
+    """
+    질의를 키워드로 분류만 하고 결과를 반환 (검색은 수행하지 않음)
+    """
+    try:
+        classification = classify_query_keywords(search_query.query)
+        return {
+            "query": search_query.query,
+            "classification": classification
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"분류 실패: {str(e)}")
+
+# ====================================================================
+# 3. 패널 상세 정보 조회 API
+# ====================================================================
+
+@app.get("/api/panels/{pid}")
+async def get_panel_details(pid: int):
+    """
+    특정 PID의 패널 상세 정보를 조회합니다.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(status_code=500, detail="데이터베이스 연결 실패")
+        
+        cur = conn.cursor()
+        
+        # Welcome 테이블에서 기본 정보 조회
+        cur.execute("""
+            SELECT pid, gender, birth_year, region, marital_status, 
+                   income_personal_monthly, job_title_raw
+            FROM welcome 
+            WHERE pid = %s
+        """, (pid,))
+        
+        result = cur.fetchone()
+        
+        if not result:
+            raise HTTPException(status_code=404, detail=f"PID {pid}를 찾을 수 없습니다.")
+        
+        panel_data = {
+            "pid": result[0],
+            "gender": result[1],
+            "birth_year": result[2],
+            "region": result[3],
+            "marital_status": result[4],
+            "income_personal_monthly": result[5],
+            "job_title": result[6]
+        }
+        
+        cur.close()
+        return panel_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"조회 실패: {str(e)}")
+    finally:
+        if conn:
+            conn.close()
+
+# ====================================================================
+# 4. 헬스체크
+# ====================================================================
+
 @app.get("/")
 def read_root():
-    return {"Hello": "Welcome to the Hybrid Search API"}
+    return {
+        "service": "Multi-Table Hybrid Search API",
+        "version": "2.0",
+        "status": "running"
+    }
+
+@app.get("/health")
+def health_check():
+    """시스템 상태 확인"""
+    try:
+        # DB 연결 테스트
+        conn = get_db_connection()
+        db_status = "ok" if conn else "error"
+        if conn:
+            conn.close()
+        
+        return {
+            "status": "healthy",
+            "database": db_status
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }

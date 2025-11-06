@@ -9,109 +9,130 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 
-# =======================================================
-# 1. claude 모델을 모듈 수준에서 한 번만 초기화한다.
-# =======================================================
+# Claude 모델 초기화
 try:
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-opus-4-1", temperature=0.0)  # 👈 0으로 변경
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-opus-4-1", temperature=0.1)
 except Exception as e:
     CLAUDE_CLIENT = None
     print(f"Anthropic 클라이언트 생성 실패: {e}")
 
-# 하이브리드 검색을 위한 질의 분리 함수
-def split_query_for_hybrid_search(query: str) -> dict:
+def classify_query_keywords(query: str) -> dict:
     """
-    Claude API를 이용해 질의를 정형(Structured Filter)과 비정형(Semantic Keyword)으로 분리합니다.
+    LLM을 사용하여 질의를 분석하고 Welcome/QPoll 키워드로 분류합니다.
+    
+    반환 형식:
+    {
+        "welcome_keywords": {
+            "objective": ["키워드1", "키워드2"],  # 객관식 (PostgreSQL)
+            "subjective": ["키워드3"]              # 주관식 (Qdrant)
+        },
+        "qpoll_keywords": {
+            "survey_type": "설문종류",  # 예: "lifestyle", "preference" 등
+            "keywords": ["키워드4", "키워드5"]
+        }
+    }
     """
     if CLAUDE_CLIENT is None:
-        raise HTTPException(status_code=500, detail="Anthropic Claude 클라이언트가 초기화되지 않았습니다.")
+        raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    current_year = datetime.now().year
-
-    system_prompt = f"""당신은 사용자의 자연어 질의를 구조화된 검색 조건으로 변환하는 전문가입니다.
+    system_prompt = """당신은 사용자 질의를 분석하여 데이터베이스 테이블별 검색 키워드로 분류하는 전문가입니다.
 
 # 작업 목표
-사용자 질의를 분석하여 다음 3가지 정보를 추출하고 JSON 형식으로 반환하세요:
-1. filters: 명시적 조건들의 배열 (성별, 나이, 지역 등)
-2. semantic_query: 추상적 관심사/라이프스타일 키워드
-3. target_count: 요청된 결과 개수 (없으면 null)
+사용자 질의를 분석하여 다음과 같이 분류하세요:
+
+1. **Welcome 테이블 관련 키워드**
+   - objective: 명확한 속성 기반 조건 (성별, 나이, 지역, 소득 등)
+   - subjective: 추상적/주관적 표현 (라이프스타일, 관심사, 성향 등)
+
+2. **QPoll 테이블 관련 키워드**
+   - survey_type: 설문 유형 분류
+   - keywords: 해당 설문에서 검색할 키워드
+
+# Welcome 테이블 필드 (objective용)
+- 인구통계: gender(성별), birth_year(출생연도), region(지역), marital_status(결혼상태)
+- 경제: income_personal_monthly(개인소득), income_household_monthly(가구소득), job_title_raw(직업)
+- 가족: children_count(자녀수), family_size(가족구성원수)
+- 소유물: owned_electronics(가전제품), phone_brand(휴대폰), car_ownership(자동차)
+- 생활습관: smoking_experience(흡연), drinking_experience(음주)
+
+# Welcome 테이블 - 주관식 키워드 (subjective용)
+- 라이프스타일, 취미, 관심사, 가치관, 소비패턴, 성향 등 추상적 표현
+
+# QPoll 설문 유형
+- lifestyle: 라이프스타일/일상생활 관련
+- consumption: 소비행태/구매패턴
+- media: 미디어 이용/콘텐츠 선호
+- health: 건강/운동/식습관
+- technology: 기술/디지털 기기 사용
+- travel: 여행/레저 활동
+- finance: 금융/투자 관련
 
 # 출력 형식
-반드시 아래 형식의 순수 JSON만 반환하세요. 설명이나 마크다운은 절대 포함하지 마세요.
+반드시 순수 JSON만 반환하세요:
 
-{{
-  "filters": [
-    {{"key": "필드명", "operator": "연산자", "value": "값"}}
-  ],
-  "semantic_query": "검색 키워드",
-  "target_count": null
-}}
+{
+  "welcome_keywords": {
+    "objective": ["키워드1", "키워드2"],
+    "subjective": ["키워드3"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "설문종류 또는 null",
+    "keywords": ["키워드4"]
+  }
+}
 
-# 사용 가능한 필드
-- gender: 성별 (예: 'M', 'F')
-- birth_year: 출생연도
-- region_minor / region: 거주 지역 (예: '경기', '서울', '인천')
-- marital_status: 결혼 여부
-- children_count: 자녀 수
-- family_size: 가족 구성 인원
-- education_level: 최종 학력
-- job_title_raw / job_duty: 직종 및 직무
-- income_personal_monthly / income_household_monthly: 개인 및 가구 월소득
-- owned_electronics: 보유 가전제품 리스트
-- phone_brand / phone_model_raw: 휴대폰 제조사 및 모델
-- car_ownership / car_manufacturer: 자동차 보유 여부 및 제조사
-- smoking_experience / drinking_experience: 흡연 및 음주 경험
-
-# 연산자
-- EQ: 일치
-- BETWEEN: 범위 (value는 [최소, 최대] 배열)
-- GT/LT: 초과/미만
-- GTE/LTE: 이상/이하
-- CONTAINS: 배열 포함 (owned_electronics 전용)
-
-# 나이 변환 규칙 (현재 {current_year}년)
-- 30대 → birth_year BETWEEN [1986, 1995]
-- 35세 → birth_year EQ {current_year - 35}
-- 30~40대 → birth_year BETWEEN [1976, 1995]
-
-# 값 매핑
-- 성별: 남자/남성/남 → M, 여자/여성/여 → F
-- 결혼: 미혼/싱글 → 미혼, 결혼/기혼 → 기혼, 돌싱/이혼 → 이혼
-- 음주: 술먹는/음주 → 경험 있음, 술안먹는/금주 → 경험 없음
-- 차량: 차있음/자가용 → 보유, 차없음 → 미보유
+# 분류 규칙
+1. 명확한 수치/범주형 조건 → welcome_keywords.objective
+2. 추상적/감성적 표현 → welcome_keywords.subjective
+3. 설문 응답 관련 → qpoll_keywords
+4. 매칭되지 않으면 빈 배열 또는 null
 
 # 예시
 
-입력: "경기 30대 남자 중 술먹는 사람 50명"
+입력: "경기 30대 남자 중 럭셔리 소비에 관심있는 사람"
 출력:
-{{
-  "filters": [
-    {{"key": "region", "operator": "EQ", "value": "경기"}},  
-    {{"key": "birth_year", "operator": "BETWEEN", "value": [1986, 1995]}},
-    {{"key": "gender", "operator": "EQ", "value": "M"}},
-    {{"key": "drinking_experience", "operator": "EQ", "value": "경험 있음"}}
-  ],
-  "semantic_query": "",
-  "target_count": 50
-}}
+{
+  "welcome_keywords": {
+    "objective": ["경기", "30대", "남자"],
+    "subjective": ["럭셔리", "소비"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "consumption",
+    "keywords": ["럭셔리", "고가", "프리미엄"]
+  }
+}
 
-입력: "20대 미혼 남성 럭셔리 소비 패턴"
+입력: "서울 미혼 여성 중 요가 하는 사람"
 출력:
-{{
-  "filters": [
-    {{"key": "birth_year", "operator": "BETWEEN", "value": [1996, 2005]}},
-    {{"key": "marital_status", "operator": "EQ", "value": "미혼"}},
-    {{"key": "gender", "operator": "EQ", "value": "M"}}
-  ],
-  "semantic_query": "럭셔리 소비 패턴",
-  "target_count": null
-}}
+{
+  "welcome_keywords": {
+    "objective": ["서울", "미혼", "여성"],
+    "subjective": ["운동", "건강"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "health",
+    "keywords": ["요가", "운동", "헬스"]
+  }
+}
+
+입력: "20대 남성 게임 유저"
+출력:
+{
+  "welcome_keywords": {
+    "objective": ["20대", "남성"],
+    "subjective": ["게임"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "media",
+    "keywords": ["게임", "게이머", "플레이"]
+  }
+}
 
 # 중요 규칙
-- 순수 JSON만 반환 (마크다운, 코드블록, 설명 금지)
-- filters가 없으면 빈 배열 []
-- semantic_query가 없으면 빈 문자열 ""
-- target_count가 없으면 null"""
+- 순수 JSON만 반환 (마크다운, 설명 금지)
+- 키워드는 간결하게 (1-3단어)
+- 중복 키워드 허용 (테이블마다 다른 방식으로 검색)
+- 매칭 안 되면 빈 배열/null"""
 
     user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
     
@@ -122,10 +143,8 @@ def split_query_for_hybrid_search(query: str) -> dict:
         ]
         response = CLAUDE_CLIENT.invoke(messages)
         
-        # ✅ JSON 추출 로직
+        # JSON 추출
         text_output = response.content.strip()
-        
-        # 디버깅: 원본 응답 출력
         print(f"🔍 Claude 원본 응답:\n{text_output}\n{'='*50}")
         
         # 코드 블록 제거
@@ -134,44 +153,26 @@ def split_query_for_hybrid_search(query: str) -> dict:
         
         if match:
             text_output = match.group(1).strip()
-            print(f"✅ 코드 블록 제거 완료")
         
-        # 앞뒤 백틱 제거
         text_output = text_output.strip('`').strip()
         
         # JSON 파싱
         try:
             parsed = json.loads(text_output)
-            print(f"✅ JSON 파싱 성공")
-        except json.JSONDecodeError as je:
-            print(f"❌ JSON 파싱 실패!")
-            print(f"위치: line {je.lineno}, col {je.colno}")
-            print(f"메시지: {je.msg}")
-            print(f"파싱 시도 텍스트:\n{text_output}")
+            print(f"✅ 키워드 분류 성공")
+            print(f"Welcome 객관식: {parsed.get('welcome_keywords', {}).get('objective', [])}")
+            print(f"Welcome 주관식: {parsed.get('welcome_keywords', {}).get('subjective', [])}")
+            print(f"QPoll: {parsed.get('qpoll_keywords', {})}")
+            return parsed
             
-            # 혹시 JSON이 중간에 있는 경우를 위한 추가 시도
+        except json.JSONDecodeError as je:
+            print(f"❌ JSON 파싱 실패: {je}")
+            # 중간 JSON 추출 시도
             json_match = re.search(r'\{.*\}', text_output, re.DOTALL)
             if json_match:
-                print("⚠️  중간 JSON 추출 시도...")
-                text_output = json_match.group(0)
-                parsed = json.loads(text_output)
-            else:
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"Claude 응답 JSON 파싱 실패: {je.msg}"
-                )
-        
-        # 결과 반환
-        filters = parsed.get("filters", []) 
-        semantic = parsed.get("semantic_query", "").strip()
-        
-        print(f"✅ 파싱 완료 - filters: {len(filters)}개, semantic: '{semantic}'")
-        
-        return {
-            "structured_condition": json.dumps(filters, ensure_ascii=False),
-            "semantic_condition": semantic
-        }
-
+                return json.loads(json_match.group(0))
+            raise HTTPException(status_code=500, detail=f"Claude 응답 파싱 실패: {je.msg}")
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -180,11 +181,12 @@ def split_query_for_hybrid_search(query: str) -> dict:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"API 오류: {str(e)}")
 
+# 테스트 코드
 if __name__ == "__main__":
     test_queries = [
-        "최신 기술에 관심 많은 20대 남성",
-        "경기 30대 남자 중 술먹는 사람 50명",
-        "서울 기혼 여성 자동차 보유"
+        "경기 30대 남자 중 럭셔리 소비에 관심있는 사람",
+        "서울 미혼 여성 중 요가 하는 사람",
+        "20대 남성 게임 유저"
     ]
     
     for query in test_queries:
@@ -192,9 +194,8 @@ if __name__ == "__main__":
         print(f"테스트 쿼리: '{query}'")
         print('='*60)
         try:
-            result = split_query_for_hybrid_search(query)
+            result = classify_query_keywords(query)
             print("\n✅ [성공]")
-            print(f"정형 조건:\n{json.dumps(json.loads(result['structured_condition']), indent=2, ensure_ascii=False)}")
-            print(f"\n비정형 검색어: '{result['semantic_condition']}'")
+            print(json.dumps(result, indent=2, ensure_ascii=False))
         except Exception as e:
             print(f"\n❌ [실패]: {e}")
