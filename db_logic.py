@@ -1,34 +1,33 @@
-# db_logic.py (최종 버전: JSONB 쿼리 및 안전한 파라미터 전달)
-
 import os
 import psycopg2
 from dotenv import load_dotenv
-import json
-from qdrant_client import QdrantClient, models
-from qdrant_client.models import PointStruct, VectorParams, Distance, NamedVector
-from qdrant_client.models import Filter, FieldCondition, MatchAny, ScoredPoint
+from qdrant_client import QdrantClient
 
 load_dotenv()
 
 # =======================================================
-# 0. Qdrant 클라이언트 초기화
+# 1. Qdrant 클라이언트
 # =======================================================
+
 def get_qdrant_client():
     """Qdrant 클라이언트를 생성하고 반환합니다."""
     try:
-        # 환경 변수에서 Qdrant 호스트와 포트를 가져옵니다.
-        client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
-        print("Qdrant 클라이언트 연결 성공!")
+        client = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", 6333))
+        )
+        print("✅ Qdrant 클라이언트 연결 성공")
         return client
     except Exception as e:
-        print(f"Qdrant 클라이언트 연결 실패: {e}")
+        print(f"❌ Qdrant 클라이언트 연결 실패: {e}")
         return None
-# =======================================================
-# 1. DB 연결 및 테이블 생성 함수 (로직 유지)
-# =======================================================
-def get_db_connection():
-    """데이터베이스에 연결하고 연결 객체를 반환합니다."""
 
+# =======================================================
+# 2. PostgreSQL 연결
+# =======================================================
+
+def get_db_connection():
+    """PostgreSQL 데이터베이스에 연결하고 연결 객체를 반환합니다."""
     try:
         conn = psycopg2.connect(
             host=os.getenv("DB_HOST"),
@@ -38,87 +37,250 @@ def get_db_connection():
         )
         return conn
     except psycopg2.Error as e:
-        print(f"데이터베이스 연결 실패: {e}")
+        print(f"❌ 데이터베이스 연결 실패: {e}")
         return None
 
 # =======================================================
-# 2. 유틸리티 함수 (PostgreSQL WHERE 절 변환)
+# 3. 검색 로그 기록
 # =======================================================
-def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, list]:
-    """
-    Claude로부터 받은 JSON 문자열 필터를 PostgreSQL JSONB WHERE 절과 
-    psycopg2 파라미터 리스트로 변환하여 SQL 인젝션을 방지합니다.
-    """
-    try:
-        filters = json.loads(structured_condition_json_str)
-    except json.JSONDecodeError:
-        return "", []
 
-    conditions = []
-    params = []
-    
-    for f in filters:
-        key = f.get("key")
-        operator = f.get("operator")
-        value = f.get("value")
-
-        if not key or not operator or value is None:
-            continue
-
-        # 모든 필터는 panels_master의 ai_insights JSONB 컬럼을 참조합니다.
-        jsonb_access = f"structured_data->>'{key}'"
-
-        if operator == "EQ":
-            conditions.append(f"{jsonb_access} = %s")
-            params.append(value)
-        
-        elif operator == "BETWEEN" and isinstance(value, list) and len(value) == 2:
-            # 숫자로 명시적 캐스팅이 필요하며, BETWEEN은 두 개의 %s 파라미터가 필요합니다.
-            conditions.append(f"({jsonb_access})::int BETWEEN %s AND %s")
-            params.extend(value) # 리스트의 두 요소를 파라미터에 추가
-            
-        elif operator == "GT":
-             conditions.append(f"({jsonb_access})::int > %s")
-             params.append(value)
-             
-        elif operator == "LT":
-             conditions.append(f"({jsonb_access})::int < %s")
-             params.append(value)
-            
-        # NOTE: JSONB의 값은 텍스트(->>)로 추출되므로, 숫자 비교 시 ::int로 캐스팅합니다.
-
-    if not conditions:
-        return "", []
-
-    # 모든 조건을 AND로 연결하고 ' WHERE ' 구문 추가
-    return " WHERE " + " AND ".join(conditions), params
-
-# =======================================================
-# 4. 검색 로그 기록 함수
-# =======================================================
 def log_search_query(query: str, results_count: int, user_uid: int = None):
+    """
+    사용자의 검색 활동을 데이터베이스에 기록합니다.
+    
+    Args:
+        query: 검색 질의 텍스트
+        results_count: 검색 결과 개수
+        user_uid: 사용자 UID (선택)
+        
+    Returns:
+        log_id: 기록된 로그의 ID
+    """
     conn = None
     try:
         conn = get_db_connection()
         if conn:
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO search_log (query, results_count, uid) VALUES (%s, %s, %s) RETURNING id",
+                """
+                INSERT INTO search_log (query, results_count, uid, created_at) 
+                VALUES (%s, %s, %s, NOW()) 
+                RETURNING id
+                """,
                 (query, results_count, user_uid)
             )
             log_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
+            print(f"✅ 검색 로그 기록 완료 (ID: {log_id})")
             return log_id
     except Exception as e:
-        print(f"검색 로그 기록 실패: {e}")
+        print(f"❌ 검색 로그 기록 실패: {e}")
         return None
     finally:
         if conn:
             conn.close()
 
+# =======================================================
+# 4. 테이블 생성 (초기 설정용)
+# =======================================================
+
+'''
+def create_tables():
+    """
+    필요한 테이블들을 생성합니다.
+    Welcome 테이블과 QPoll 테이블, 검색 로그 테이블을 생성합니다.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return False
+        
+        cur = conn.cursor()
+        
+        # Welcome 테이블 (패널 기본 정보)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS welcome (
+                pid SERIAL PRIMARY KEY,
+                gender VARCHAR(10),
+                birth_year INTEGER,
+                region VARCHAR(50),
+                region_minor VARCHAR(50),
+                marital_status VARCHAR(20),
+                children_count INTEGER,
+                family_size INTEGER,
+                education_level VARCHAR(50),
+                job_title_raw VARCHAR(100),
+                job_duty VARCHAR(100),
+                income_personal_monthly INTEGER,
+                income_household_monthly INTEGER,
+                owned_electronics TEXT[],
+                phone_brand VARCHAR(50),
+                phone_model_raw VARCHAR(100),
+                car_ownership VARCHAR(20),
+                car_manufacturer VARCHAR(50),
+                smoking_experience VARCHAR(20),
+                drinking_experience VARCHAR(20),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # QPoll 테이블 (설문 응답)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS qpoll (
+                response_id SERIAL PRIMARY KEY,
+                pid INTEGER REFERENCES welcome(pid),
+                survey_type VARCHAR(50),
+                question_id INTEGER,
+                question_text TEXT,
+                answer_text TEXT,
+                answer_score INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # 검색 로그 테이블
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS search_log (
+                id SERIAL PRIMARY KEY,
+                query TEXT NOT NULL,
+                results_count INTEGER,
+                uid INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # 인덱스 생성
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_welcome_gender ON welcome(gender)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_welcome_region ON welcome(region)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_welcome_birth_year ON welcome(birth_year)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_qpoll_pid ON qpoll(pid)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_qpoll_survey_type ON qpoll(survey_type)")
+        
+        conn.commit()
+        cur.close()
+        
+        print("✅ 테이블 생성 완료")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 테이블 생성 실패: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+'''
+
+# =======================================================
+# 5. Welcome 객관식 조건 빌더 (개선된 버전)
+# =======================================================
+
+def build_welcome_query_conditions(keywords: list[str]) -> tuple[str, list]:
+    """
+    키워드 리스트를 받아 WHERE 절과 파라미터를 생성합니다.
+    
+    Args:
+        keywords: ["경기", "30대", "남자"] 같은 키워드
+        
+    Returns:
+        (where_clause, params): SQL WHERE 절과 파라미터 튜플
+    """
+    conditions = []
+    params = []
+    current_year = 2025
+    
+    for keyword in keywords:
+        kw = keyword.strip().lower()
+        
+        # 성별
+        if kw in ['남자', '남성', '남']:
+            conditions.append("gender = %s")
+            params.append('M')
+        elif kw in ['여자', '여성', '여']:
+            conditions.append("gender = %s")
+            params.append('F')
+        
+        # 지역
+        elif keyword in ['서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종']:
+            conditions.append("region = %s")
+            params.append(keyword)
+        
+        # 나이대 (예: 20대, 30대)
+        elif '대' in keyword and keyword[:-1].isdigit():
+            age_prefix = int(keyword[:-1])
+            birth_start = current_year - age_prefix - 9
+            birth_end = current_year - age_prefix
+            conditions.append("birth_year BETWEEN %s AND %s")
+            params.extend([birth_start, birth_end])
+        
+        # 결혼 상태
+        elif kw in ['미혼', '싱글']:
+            conditions.append("marital_status = %s")
+            params.append('미혼')
+        elif kw in ['기혼', '결혼']:
+            conditions.append("marital_status = %s")
+            params.append('기혼')
+        elif kw in ['이혼', '돌싱']:
+            conditions.append("marital_status = %s")
+            params.append('이혼')
+        
+        # 음주
+        elif kw in ['술먹는', '음주']:
+            conditions.append("drinking_experience = %s")
+            params.append('경험 있음')
+        elif kw in ['술안먹는', '금주']:
+            conditions.append("drinking_experience = %s")
+            params.append('경험 없음')
+        
+        # 흡연
+        elif kw in ['흡연', '담배']:
+            conditions.append("smoking_experience = %s")
+            params.append('경험 있음')
+        elif kw in ['비흡연', '금연']:
+            conditions.append("smoking_experience = %s")
+            params.append('경험 없음')
+        
+        # 차량 보유
+        elif kw in ['차있음', '자가용', '차량보유']:
+            conditions.append("car_ownership = %s")
+            params.append('보유')
+        elif kw in ['차없음']:
+            conditions.append("car_ownership = %s")
+            params.append('미보유')
+    
+    if not conditions:
+        return "", []
+    
+    where_clause = " WHERE " + " AND ".join(conditions)
+    return where_clause, params
+
+# =======================================================
+# 테스트 코드
+# =======================================================
+
 if __name__ == "__main__":
-    if get_db_connection():
-        create_tables()
+    print("데이터베이스 연결 테스트...")
+    
+    # PostgreSQL 연결 테스트
+    conn = get_db_connection()
+    if conn:
+        print("✅ PostgreSQL 연결 성공")
+        
+        conn.close()
     else:
-        print("데이터베이스 연결 실패로 인해 테이블을 생성할 수 없습니다.")
+        print("❌ PostgreSQL 연결 실패")
+    
+    # Qdrant 연결 테스트
+    qdrant = get_qdrant_client()
+    if qdrant:
+        print("✅ Qdrant 연결 성공")
+    else:
+        print("❌ Qdrant 연결 실패")
+    
+    # 조건 빌더 테스트
+    print("\n조건 빌더 테스트:")
+    test_keywords = ["경기", "30대", "남자", "미혼"]
+    where, params = build_welcome_query_conditions(test_keywords)
+    print(f"WHERE 절: {where}")
+    print(f"파라미터: {params}")
