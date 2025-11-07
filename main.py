@@ -14,6 +14,7 @@ app = FastAPI(title="Multi-Table Hybrid Search API v2")
 
 class SearchQuery(BaseModel):
     query: str
+    search_mode: str = "all"  # 기본값: 모든 모드 결과 반환
 
 class SearchResponse(BaseModel):
     query: str
@@ -31,18 +32,34 @@ async def search_panels(search_query: SearchQuery):
     """
     자연어 질의를 받아 Welcome/QPoll 테이블에서 하이브리드 검색을 수행합니다.
     
+    검색 모드:
+    - all (기본): 교집합, 합집합, 가중치 모두 반환 ⭐추천
+    - intersection: 교집합만 (모든 조건 만족)
+    - union: 합집합만 (하나라도 조건 만족)
+    - weighted: 가중치 기반만 (객관식 40%, 주관식 30%, QPoll 30%)
+    
     프로세스:
     1. LLM이 질의를 Welcome(객관/주관)/QPoll 키워드로 분류
     2. Welcome 객관식 → PostgreSQL 검색 (pid1)
     3. Welcome 주관식 → Qdrant 임베딩 검색 (pid2)
     4. QPoll → Qdrant 임베딩 검색 (pid3)
-    5. 교집합 계산 및 반환
+    5. 3가지 방식으로 결과 통합 및 정렬
     """
     query_text = search_query.query
+    search_mode = search_query.search_mode
+    
+    # 검색 모드 검증
+    valid_modes = ["all", "weighted", "union", "intersection"]
+    if search_mode not in valid_modes:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search_mode. Must be one of: {valid_modes}"
+        )
     
     try:
         print(f"\n{'='*70}")
         print(f"🔍 검색 요청: {query_text}")
+        print(f"📊 검색 모드: {search_mode}")
         print(f"{'='*70}\n")
         
         # 1단계: LLM 키워드 분류
@@ -51,36 +68,98 @@ async def search_panels(search_query: SearchQuery):
         
         # 2단계: 하이브리드 검색 수행
         print("\n📌 2단계: 하이브리드 검색")
-        search_results = hybrid_search(classification)
+        search_results = hybrid_search(classification, search_mode=search_mode)
         
-        # 3단계: 최종 PID 목록 추출 (교집합)
-        final_pids = list(search_results['intersection'])
+        # 3단계: 검색 로그 기록
+        if search_mode == "all":
+            total_count = search_results['results']['union']['count']
+        else:
+            total_count = len(search_results['final_result'])
         
-        # 4단계: 검색 로그 기록
-        log_search_query(query_text, len(final_pids))
+        log_search_query(query_text, total_count)
         
-        # 5단계: 응답 구성
-        response = {
-            "query": query_text,
-            "classification": classification,
-            "results": {
-                "welcome_objective_count": len(search_results['pid1']),
-                "welcome_subjective_count": len(search_results['pid2']),
-                "qpoll_count": len(search_results['pid3']),
-                "intersection_count": len(final_pids)
-            },
-            "final_pids": final_pids[:100],  # 상위 100개만 반환 (API 응답 크기 제한)
-            "summary": {
-                "total_candidates": len(final_pids),
-                "search_strategy": {
-                    "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
-                    "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
-                    "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+        # 4단계: 응답 구성
+        if search_mode == "all":
+            # 모든 모드 결과 반환
+            response = {
+                "query": query_text,
+                "classification": classification,
+                "source_counts": {
+                    "welcome_objective_count": len(search_results['pid1']),
+                    "welcome_subjective_count": len(search_results['pid2']),
+                    "qpoll_count": len(search_results['pid3'])
+                },
+                "results": {
+                    "intersection": {
+                        "count": search_results['results']['intersection']['count'],
+                        "pids": search_results['results']['intersection']['pids'][:100],
+                        "top_scores": {
+                            str(pid): search_results['results']['intersection']['scores'].get(pid, 0)
+                            for pid in search_results['results']['intersection']['pids'][:10]
+                        }
+                    },
+                    "union": {
+                        "count": search_results['results']['union']['count'],
+                        "pids": search_results['results']['union']['pids'][:100],
+                        "top_scores": {
+                            str(pid): search_results['results']['union']['scores'].get(pid, 0)
+                            for pid in search_results['results']['union']['pids'][:10]
+                        }
+                    },
+                    "weighted": {
+                        "count": search_results['results']['weighted']['count'],
+                        "pids": search_results['results']['weighted']['pids'][:100],
+                        "weights": search_results['results']['weighted']['weights'],
+                        "top_scores": {
+                            str(pid): search_results['results']['weighted']['scores'].get(pid, 0)
+                            for pid in search_results['results']['weighted']['pids'][:10]
+                        }
+                    }
+                },
+                "summary": {
+                    "search_mode": search_mode,
+                    "search_strategy": {
+                        "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
+                        "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
+                        "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+                    }
                 }
             }
-        }
+        else:
+            # 단일 모드 결과 반환
+            final_pids = search_results['final_result']
+            match_scores = search_results['match_scores']
+            
+            response = {
+                "query": query_text,
+                "classification": classification,
+                "source_counts": {
+                    "welcome_objective_count": len(search_results['pid1']),
+                    "welcome_subjective_count": len(search_results['pid2']),
+                    "qpoll_count": len(search_results['pid3'])
+                },
+                "results": {
+                    search_mode: {
+                        "count": len(final_pids),
+                        "pids": final_pids[:100],
+                        "top_scores": {
+                            str(pid): match_scores.get(pid, 0)
+                            for pid in final_pids[:10]
+                        }
+                    }
+                },
+                "summary": {
+                    "total_candidates": len(final_pids),
+                    "search_mode": search_mode,
+                    "search_strategy": {
+                        "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
+                        "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
+                        "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+                    }
+                }
+            }
         
-        print(f"\n✅ 검색 완료: {len(final_pids)}명의 패널 발견")
+        print(f"\n✅ 검색 완료")
         
         return response
         

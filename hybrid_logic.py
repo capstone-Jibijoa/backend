@@ -11,128 +11,118 @@ load_dotenv()
 
 # Claude 모델 초기화
 try:
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-opus-4-1", temperature=0.1)
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1)
 except Exception as e:
     CLAUDE_CLIENT = None
     print(f"Anthropic 클라이언트 생성 실패: {e}")
 
 def classify_query_keywords(query: str) -> dict:
-    """
-    LLM을 사용하여 질의를 분석하고 Welcome/QPoll 키워드로 분류합니다.
-    
-    반환 형식:
-    {
-        "welcome_keywords": {
-            "objective": ["키워드1", "키워드2"],  # 객관식 (PostgreSQL)
-            "subjective": ["키워드3"]              # 주관식 (Qdrant)
-        },
-        "qpoll_keywords": {
-            "survey_type": "설문종류",  # 예: "lifestyle", "preference" 등
-            "keywords": ["키워드4", "키워드5"]
-        }
-    }
-    """
+   
     if CLAUDE_CLIENT is None:
         raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    system_prompt = """당신은 사용자 질의를 분석하여 데이터베이스 테이블별 검색 키워드로 분류하는 전문가입니다.
+    system_prompt = """
+ 사용자 쿼리를 분석하고 데이터베이스 테이블 검색 키워드로 분류하는 전문가입니다. 사용자 쿼리가 주어지면 두 개의 서로 다른 데이터베이스 테이블에 대한 관련 키워드를 추출해야 합니다.
 
-# 작업 목표
-사용자 질의를 분석하여 다음과 같이 분류하세요:
+분석할 사용자 쿼리는 다음과 같습니다.
+<query>
+{{QUERY}}
+</query>
 
-1. **Welcome 테이블 관련 키워드**
-   - objective: 명확한 속성 기반 조건 (성별, 나이, 지역, 소득 등)
-   - subjective: 추상적/주관적 표현 (라이프스타일, 관심사, 성향 등)
+이 쿼리를 분석하고 키워드를 두 가지 범주로 분류하는 것이 과제입니다.
 
-2. **QPoll 테이블 관련 키워드**
-   - survey_type: 설문 유형 분류
-   - keywords: 해당 설문에서 검색할 키워드
+## 분류 범주
 
-# Welcome 테이블 필드 (objective용)
-- 인구통계: gender(성별), birth_year(출생연도), region(지역), marital_status(결혼상태)
-- 경제: income_personal_monthly(개인소득), income_household_monthly(가구소득), job_title_raw(직업)
-- 가족: children_count(자녀수), family_size(가족구성원수)
-- 소유물: owned_electronics(가전제품), phone_brand(휴대폰), car_ownership(자동차)
-- 생활습관: smoking_experience(흡연), drinking_experience(음주)
+**1. 시작 테이블 키워드:**
+- `objective`: 명확하고 사실적인 데이터(인구 통계, 위치, 연령대, 구체적인 측정 기준)
+- `subjective`: 추상적/주관적 표현(라이프스타일 선호도, 관심사, 행동, 성격 특성)
 
-# Welcome 테이블 - 주관식 키워드 (subjective용)
-- 라이프스타일, 취미, 관심사, 가치관, 소비패턴, 성향 등 추상적 표현
+**2. QPoll 테이블 키워드:**
+- `survey_type`: 설문조사 또는 연구 주제 유형
+- `keywords`: 설문조사 데이터에서 검색할 특정 용어
 
-# QPoll 설문 유형
-- lifestyle: 라이프스타일/일상생활 관련
-- consumption: 소비행태/구매패턴
-- media: 미디어 이용/콘텐츠 선호
-- health: 건강/운동/식습관
-- technology: 기술/디지털 기기 사용
-- travel: 여행/레저 활동
-- finance: 금융/투자 관련
+## 출력 형식
 
-# 출력 형식
-반드시 순수 JSON만 반환하세요:
+다음 형식의 순수 JSON만 반환해야 합니다.
 
+```json
 {
-  "welcome_keywords": {
-    "objective": ["키워드1", "키워드2"],
-    "subjective": ["키워드3"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "설문종류 또는 null",
-    "keywords": ["키워드4"]
-  }
+"welcome_keywords": {
+"objective": ["keyword1", "keyword2"],
+"subjective": ["keyword3", "keyword4"]
+},
+"qpoll_keywords": {
+"survey_type": "survey type or null",
+"keywords": ["keyword5", "keyword6"]
 }
+}
+```
 
-# 분류 규칙
-1. 명확한 수치/범주형 조건 → welcome_keywords.objective
-2. 추상적/감성적 표현 → welcome_keywords.subjective
-3. 설문 응답 관련 → qpoll_keywords
-4. 매칭되지 않으면 빈 배열 또는 null
+## 분류 규칙
 
-# 예시
+1. **객관적 키워드**: 인구 통계, 위치, 연령대, 성별, 직업, 소득 수준, 교육 수준 - 측정 가능하거나 범주화된 모든 것
+2. **주관적 키워드**: 관심사, 취미, 라이프스타일 선택, 선호도, 행동, 성격 특성 등 해석 가능한 모든 것
+3. **QPoll 키워드**: 쿼리가 설문조사, 여론조사, 의견 또는 설문조사 응답에서 발견될 수 있는 특정 주제를 언급하는 경우
+4. **설문조사 유형**: 쿼리가 설문조사 데이터와 관련된 경우 주요 주제 또는 테마를 추출합니다.
+5. **키워드는 간결해야 합니다**: 각 1~3단어
+6. **해당되지 않는 범주는 빈 배열을 사용합니다**: `[]`
+7. **해당되지 않는 경우 survey_type에 null을 사용합니다**
 
-입력: "경기 30대 남자 중 럭셔리 소비에 관심있는 사람"
+## 예시
+
+입력: "부산, 경남 40대 남녀 해외여행 계획 중인 20명"
 출력:
+```json
 {
   "welcome_keywords": {
-    "objective": ["경기", "30대", "남자"],
-    "subjective": ["럭셔리", "소비"]
+    "objective": ["부산", "경남", "40대", "남녀"],
+    "주관적": ["해외여행 계획", "여행"]
   },
   "qpoll_keywords": {
-    "survey_type": "consumption",
-    "keywords": ["럭셔리", "고가", "프리미엄"]
+    "survey_type": "여행",
+    "keywords": ["일본", "베트남", "유럽", "항공권", "숙소"]
   }
 }
+````
 
-입력: "서울 미혼 여성 중 요가 하는 사람"
-출력:
+입력: "전국 20~30대 직장인 커피 선호하는 100명"
+산출:
+``json
 {
   "welcome_keywords": {
-    "objective": ["서울", "미혼", "여성"],
-    "subjective": ["운동", "건강"]
+    "objective": ["전국", "20~30대", "직장인"],
+    "주관적": ["커피 선호", "카페 이용"]
   },
   "qpoll_keywords": {
-    "survey_type": "health",
-    "keywords": ["요가", "운동", "헬스"]
+    "survey_type": "커피",
+    "keywords": ["스타벅스", "아메리카노", "카페", "프랜차이즈"]
   }
 }
+````
 
-입력: "20대 남성 게임 유저"
-출력:
+입력: "경기 20대 대학생 대중교통 이용하는 80명"
+산출:
+``json
 {
   "welcome_keywords": {
-    "objective": ["20대", "남성"],
-    "subjective": ["게임"]
+    "objective": ["경기", "20대", "대학생"],
+    "주관적": ["대중교통 이용", "교통"]
   },
   "qpoll_keywords": {
-    "survey_type": "media",
-    "keywords": ["게임", "게이머", "플레이"]
+    "survey_type": null,
+    "keywords": []
   }
 }
+```
 
-# 중요 규칙
-- 순수 JSON만 반환 (마크다운, 설명 금지)
-- 키워드는 간결하게 (1-3단어)
-- 중복 키워드 허용 (테이블마다 다른 방식으로 검색)
-- 매칭 안 되면 빈 배열/null"""
+## 중요 요구 사항
+
+- 순수 JSON만 반환합니다. 마크다운 형식, 설명, 추가 텍스트는 허용되지 않습니다.
+- 키워드는 관련성이 높고 간결해야 합니다.
+- welcome_keywords와 qpoll_keywords 모두 서로 다르게 검색되는 중복되는 개념을 포함할 수 있습니다.
+- 카테고리에 적용되는 키워드가 없는 경우, 빈 배열 `[]` 또는 `null`을 사용합니다.
+- 유효한 JSON 구문을 사용합니다.
+"""
 
     user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
     
@@ -184,9 +174,9 @@ def classify_query_keywords(query: str) -> dict:
 # 테스트 코드
 if __name__ == "__main__":
     test_queries = [
-        "경기 30대 남자 중 럭셔리 소비에 관심있는 사람",
-        "서울 미혼 여성 중 요가 하는 사람",
-        "20대 남성 게임 유저"
+        "서울 20대 남자 100명",
+        "경기 30~40대 남자 술을 먹은 사람 50명",
+        "서울, 경기 OTT 이용하는 젊은층 30명"
     ]
     
     for query in test_queries:
