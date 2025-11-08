@@ -123,7 +123,8 @@ async def search_panels(search_query: SearchQuery):
                         "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
                         "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
                     }
-                }
+                },
+                "final_pids": search_results['results']['weighted']['pids'][:100]
             }
         else:
             # 단일 모드 결과 반환
@@ -156,7 +157,8 @@ async def search_panels(search_query: SearchQuery):
                         "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
                         "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
                     }
-                }
+                },
+                "final_pids": final_pids[:100]
             }
         
         print(f"\n✅ 검색 완료")
