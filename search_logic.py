@@ -285,11 +285,24 @@ def search_welcome_subjective(keywords: list[str]) -> set[int]:
             collection_name=collection_name,
             query_vector=query_vector,
             limit=1000,
-            score_threshold=0.5
+            # score_threshold=0.1  
         )
         
-        pids = {result.payload.get('pid') for result in search_results if result.payload.get('pid')}
+        # ✅ LangChain 형식 payload 지원: metadata.pid 우선, 없으면 최상위 pid
+        pids = set()
+        for result in search_results:
+            # metadata.pid 시도 (LangChain 형식)
+            pid = result.payload.get('metadata', {}).get('pid')
+            # 최상위 pid 시도 (직접 저장 형식)
+            if pid is None:
+                pid = result.payload.get('pid')
+            
+            if pid is not None:
+                pids.add(pid)
+                if len(pids) <= 3:  # 처음 3개만 디버그 출력
+                    print(f"      → PID {pid} 추가 (score: {result.score:.4f})")
         
+        print(f"   🔍 Qdrant 원본 검색 결과: {len(search_results)}개")
         print(f"✅ Welcome 주관식 검색 결과: {len(pids)}개\n")
         return pids
         
@@ -329,7 +342,7 @@ def search_qpoll(survey_type: str, keywords: list[str]) -> set[int]:
                     query_vector=query_vector,
                     query_filter=qdrant_filter,
                     limit=1000,
-                    score_threshold=0.5
+                    # score_threshold=0.1  
                 )
             except Exception as filter_error:
                 print(f"   ⚠️  필터 적용 불가: {filter_error}")
@@ -337,17 +350,29 @@ def search_qpoll(survey_type: str, keywords: list[str]) -> set[int]:
                     collection_name=collection_name,
                     query_vector=query_vector,
                     limit=1000,
-                    score_threshold=0.5
+                    # score_threshold=0.1  
                 )
         else:
             search_results = qdrant_client.search(
                 collection_name=collection_name,
                 query_vector=query_vector,
                 limit=1000,
-                score_threshold=0.5
+                # score_threshold=0.1 
             )
         
-        pids = {result.payload.get('pid') for result in search_results if result.payload.get('pid')}
+        # ✅ LangChain 형식 payload 지원: metadata.pid 우선, 없으면 최상위 pid
+        pids = set()
+        for result in search_results:
+            # metadata.pid 시도 (LangChain 형식)
+            pid = result.payload.get('metadata', {}).get('pid')
+            # 최상위 pid 시도 (직접 저장 형식)
+            if pid is None:
+                pid = result.payload.get('pid')
+            
+            if pid is not None:
+                pids.add(pid)
+                if len(pids) <= 3:  # 처음 3개만 디버그 출력
+                    print(f"      → PID {pid} 추가 (score: {result.score:.4f})")
         
         print(f"✅ QPoll 검색 결과: {len(pids)}개\n")
         return pids
@@ -478,12 +503,12 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
 
 
 if __name__ == "__main__":
-    print("\n🧪 테스트: ['경기', '30~40대', '남자', '술']")
+    print("\n🧪 테스트: ['부산', '40대'. 가전제품 보유']")
     
     test = {
         "welcome_keywords": {
-            "objective": ["경기", "30~40대", "남자", "술"],
-            "subjective": []
+            "objective": ["부산"],
+            "subjective": ["가전제품 보유"]
         },
         "qpoll_keywords": {
             "survey_type": None,

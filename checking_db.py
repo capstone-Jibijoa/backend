@@ -30,7 +30,7 @@ def check_database_structure():
         print("\n✅ 데이터베이스 연결 성공!")
         
         # 1. welcome_meta 테이블 기본 정보
-        print("\n📋 1. welcome_meta 테이블 기본 정보:")
+        print("\n📋 1. welcome_meta2 테이블 기본 정보:")
         print("-" * 70)
         
         cur.execute("SELECT COUNT(*) FROM welcome_meta")
@@ -38,13 +38,13 @@ def check_database_structure():
         print(f"총 레코드 수: {total_count:,}개")
         
         # 2. 테이블 구조
-        print("\n📋 2. welcome_meta 테이블 구조:")
+        print("\n📋 2. welcome_meta2 테이블 구조:")
         print("-" * 70)
         
         cur.execute("""
             SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
-            WHERE table_name = 'welcome_meta'
+            WHERE table_name = 'welcome_meta2'
             ORDER BY ordinal_position
         """)
         columns = cur.fetchall()
@@ -60,7 +60,7 @@ def check_database_structure():
         
         cur.execute("""
             SELECT structured_data 
-            FROM welcome_meta 
+            FROM welcome_meta2 
             LIMIT 1
         """)
         sample_data = cur.fetchone()
@@ -154,7 +154,7 @@ def check_database_structure():
         # 30대 남성 검색 테스트
         cur.execute("""
             SELECT COUNT(*) 
-            FROM welcome_meta
+            FROM welcome_meta2
             WHERE structured_data->>'gender' = 'M'
               AND (structured_data->>'birth_year')::int BETWEEN 1986 AND 1995
         """)
