@@ -41,12 +41,14 @@ def get_db_connection():
         return None
 
 # =======================================================
-# 3. 검색 로그 기록
+# 3. 검색 로그 기록 (권한 에러 처리 개선)
 # =======================================================
 
 def log_search_query(query: str, results_count: int, user_uid: int = None):
     """
     사용자의 검색 활동을 데이터베이스에 기록합니다.
+    
+    ✅ 개선: 권한 에러 시 조용히 실패 (서비스 중단 방지)
     
     Args:
         query: 검색 질의 텍스트
@@ -54,142 +56,165 @@ def log_search_query(query: str, results_count: int, user_uid: int = None):
         user_uid: 사용자 UID (선택)
         
     Returns:
-        log_id: 기록된 로그의 ID
+        log_id: 기록된 로그의 ID (실패 시 None)
     """
     conn = None
     try:
         conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                INSERT INTO search_log (query, results_count, uid, created_at) 
-                VALUES (%s, %s, %s, NOW()) 
-                RETURNING id
-                """,
-                (query, results_count, user_uid)
+        if not conn:
+            return None
+        
+        cur = conn.cursor()
+        
+        # ✅ search_log 테이블이 있는지 먼저 확인
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'search_log'
             )
-            log_id = cur.fetchone()[0]
-            conn.commit()
+        """)
+        
+        table_exists = cur.fetchone()[0]
+        
+        if not table_exists:
+            print("⚠️  search_log 테이블이 존재하지 않습니다. 로그를 건너뜁니다.")
             cur.close()
-            print(f"✅ 검색 로그 기록 완료 (ID: {log_id})")
-            return log_id
-    except Exception as e:
-        print(f"❌ 검색 로그 기록 실패: {e}")
+            return None
+        
+        # 로그 기록 시도
+        cur.execute(
+            """
+            INSERT INTO search_log (query, results_count, uid, created_at) 
+            VALUES (%s, %s, %s, NOW()) 
+            RETURNING id
+            """,
+            (query, results_count, user_uid)
+        )
+        
+        log_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        
+        # 성공 시에만 출력 (조용히)
+        # print(f"✅ 검색 로그 기록 완료 (ID: {log_id})")
+        return log_id
+        
+    except psycopg2.errors.InsufficientPrivilege as e:
+        # ✅ 권한 에러는 무시하고 계속 진행
+        print(f"⚠️  검색 로그 기록 권한 없음 (무시하고 계속)")
+        if conn:
+            conn.rollback()
         return None
+        
+    except psycopg2.Error as e:
+        # ✅ 다른 DB 에러도 조용히 처리
+        print(f"⚠️  검색 로그 기록 실패: {e} (무시하고 계속)")
+        if conn:
+            conn.rollback()
+        return None
+        
+    except Exception as e:
+        # ✅ 예상치 못한 에러도 조용히 처리
+        print(f"⚠️  검색 로그 기록 중 예외: {e} (무시하고 계속)")
+        if conn:
+            conn.rollback()
+        return None
+        
     finally:
         if conn:
             conn.close()
 
 # =======================================================
-# 5. Welcome 객관식 조건 빌더 (개선된 버전)
+# 4. search_log 테이블 생성 (옵션)
 # =======================================================
 
-def build_welcome_query_conditions(keywords: list[str]) -> tuple[str, list]:
+def create_search_log_table():
     """
-    키워드 리스트를 받아 WHERE 절과 파라미터를 생성합니다.
-    
-    Args:
-        keywords: ["경기", "30대", "남자"] 같은 키워드
-        
-    Returns:
-        (where_clause, params): SQL WHERE 절과 파라미터 튜플
+    search_log 테이블이 없으면 생성합니다.
+    권한이 있을 때만 사용하세요.
     """
-    conditions = []
-    params = []
-    current_year = 2025
-    
-    for keyword in keywords:
-        kw = keyword.strip().lower()
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            print("❌ DB 연결 실패")
+            return False
         
-        # 성별
-        if kw in ['남자', '남성', '남']:
-            conditions.append("gender = %s")
-            params.append('M')
-        elif kw in ['여자', '여성', '여']:
-            conditions.append("gender = %s")
-            params.append('F')
+        cur = conn.cursor()
         
-        # 지역
-        elif keyword in ['서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종']:
-            conditions.append("region = %s")
-            params.append(keyword)
+        # 테이블 생성
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS search_log (
+                id SERIAL PRIMARY KEY,
+                query TEXT NOT NULL,
+                results_count INTEGER,
+                uid INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         
-        # 나이대 (예: 20대, 30대)
-        elif '대' in keyword and keyword[:-1].isdigit():
-            age_prefix = int(keyword[:-1])
-            birth_start = current_year - age_prefix - 9
-            birth_end = current_year - age_prefix
-            conditions.append("birth_year BETWEEN %s AND %s")
-            params.extend([birth_start, birth_end])
+        # 인덱스 생성
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_search_log_created_at 
+            ON search_log(created_at)
+        """)
         
-        # 결혼 상태
-        elif kw in ['미혼', '싱글']:
-            conditions.append("marital_status = %s")
-            params.append('미혼')
-        elif kw in ['기혼', '결혼']:
-            conditions.append("marital_status = %s")
-            params.append('기혼')
-        elif kw in ['이혼', '돌싱']:
-            conditions.append("marital_status = %s")
-            params.append('이혼')
+        conn.commit()
+        cur.close()
         
-        # 음주
-        elif kw in ['술먹는', '음주']:
-            conditions.append("drinking_experience = %s")
-            params.append('경험 있음')
-        elif kw in ['술안먹는', '금주']:
-            conditions.append("drinking_experience = %s")
-            params.append('경험 없음')
+        print("✅ search_log 테이블 생성 완료")
+        return True
         
-        # 흡연
-        elif kw in ['흡연', '담배']:
-            conditions.append("smoking_experience = %s")
-            params.append('경험 있음')
-        elif kw in ['비흡연', '금연']:
-            conditions.append("smoking_experience = %s")
-            params.append('경험 없음')
+    except psycopg2.errors.InsufficientPrivilege:
+        print("❌ 테이블 생성 권한이 없습니다")
+        if conn:
+            conn.rollback()
+        return False
         
-        # 차량 보유
-        elif kw in ['차있음', '자가용', '차량보유']:
-            conditions.append("car_ownership = %s")
-            params.append('보유')
-        elif kw in ['차없음']:
-            conditions.append("car_ownership = %s")
-            params.append('미보유')
-    
-    if not conditions:
-        return "", []
-    
-    where_clause = " WHERE " + " AND ".join(conditions)
-    return where_clause, params
+    except Exception as e:
+        print(f"❌ 테이블 생성 실패: {e}")
+        if conn:
+            conn.rollback()
+        return False
+        
+    finally:
+        if conn:
+            conn.close()
 
 # =======================================================
 # 테스트 코드
 # =======================================================
 
 if __name__ == "__main__":
-    print("데이터베이스 연결 테스트...")
+    print("\n" + "="*70)
+    print("🔍 데이터베이스 연결 테스트")
+    print("="*70)
     
     # PostgreSQL 연결 테스트
+    print("\n1. PostgreSQL 연결...")
     conn = get_db_connection()
     if conn:
         print("✅ PostgreSQL 연결 성공")
-        
         conn.close()
     else:
         print("❌ PostgreSQL 연결 실패")
     
     # Qdrant 연결 테스트
+    print("\n2. Qdrant 연결...")
     qdrant = get_qdrant_client()
     if qdrant:
         print("✅ Qdrant 연결 성공")
     else:
         print("❌ Qdrant 연결 실패")
     
-    # 조건 빌더 테스트
-    print("\n조건 빌더 테스트:")
-    test_keywords = ["경기", "30대", "남자", "미혼"]
-    where, params = build_welcome_query_conditions(test_keywords)
-    print(f"WHERE 절: {where}")
-    print(f"파라미터: {params}")
+    # 로그 기록 테스트
+    print("\n3. 검색 로그 기록 테스트...")
+    log_id = log_search_query("테스트 쿼리", 100)
+    if log_id:
+        print(f"✅ 로그 기록 성공 (ID: {log_id})")
+    else:
+        print("⚠️  로그 기록 실패 (권한 문제일 수 있음)")
+    
+    print("\n" + "="*70)
+    print("테스트 완료")
+    print("="*70)
