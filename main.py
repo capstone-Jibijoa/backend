@@ -1,20 +1,17 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from hybrid_logic import classify_query_keywords  # 키워드 분류 함수
-from search_logic import hybrid_search  # 통합 검색 함수
+from hybrid_logic import classify_query_keywords
+from search_logic import hybrid_search
 from db_logic import log_search_query, get_db_connection
 
-# FastAPI 애플리케이션 초기화
 app = FastAPI(title="Multi-Table Hybrid Search API v2")
 
-# ====================================================================
-# 요청/응답 모델
-# ====================================================================
 
 class SearchQuery(BaseModel):
     query: str
-    search_mode: str = "all"  # 기본값: 모든 모드 결과 반환
+    search_mode: str = "all"
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -23,32 +20,21 @@ class SearchResponse(BaseModel):
     final_panel_ids: list[str]
     summary: dict
 
-# ====================================================================
-# 1. 메인 검색 API
-# ====================================================================
 
 @app.post("/api/search", response_model=SearchResponse)
 async def search_panels(search_query: SearchQuery):
     """
-    자연어 질의를 받아 Welcome/QPoll 테이블에서 하이브리드 검색을 수행합니다.
+    자연어 질의를 받아 Welcome/QPoll 하이브리드 검색 수행
     
     검색 모드:
-    - all (기본): 교집합, 합집합, 가중치 모두 반환 ⭐추천
+    - all (기본): 교집합, 합집합, 가중치 모두 반환
     - intersection: 교집합만 (모든 조건 만족)
     - union: 합집합만 (하나라도 조건 만족)
-    - weighted: 가중치 기반만 (객관식 40%, 주관식 30%, QPoll 30%)
-    
-    프로세스:
-    1. LLM이 질의를 Welcome(객관/주관)/QPoll 키워드로 분류
-    2. Welcome 객관식 → PostgreSQL 검색 (panel_id1)
-    3. Welcome 주관식 → Qdrant 임베딩 검색 (panel_id2)
-    4. QPoll → Qdrant 임베딩 검색 (panel_id3)
-    5. 3가지 방식으로 결과 통합 및 정렬
+    - weighted: 가중치 기반 (객관 40%, 주관 30%, QPoll 30%)
     """
     query_text = search_query.query
     search_mode = search_query.search_mode
     
-    # 검색 모드 검증
     valid_modes = ["all", "weighted", "union", "intersection"]
     if search_mode not in valid_modes:
         raise HTTPException(
@@ -57,30 +43,22 @@ async def search_panels(search_query: SearchQuery):
         )
     
     try:
-        print(f"\n{'='*70}")
-        print(f"🔍 검색 요청: {query_text}")
-        print(f"📊 검색 모드: {search_mode}")
-        print(f"{'='*70}\n")
-        
         # 1단계: LLM 키워드 분류
-        print("📌 1단계: LLM 키워드 분류")
         classification = classify_query_keywords(query_text)
         
         # 2단계: 하이브리드 검색 수행
-        print("\n📌 2단계: 하이브리드 검색")
         search_results = hybrid_search(classification, search_mode=search_mode)
         
         # 3단계: 검색 로그 기록
         if search_mode == "all":
             total_count = search_results['results']['union']['count']
         else:
-            total_count = len(search_results['final_result'])
+            total_count = len(search_results['final_panel_ids'])  
         
         log_search_query(query_text, total_count)
         
         # 4단계: 응답 구성
         if search_mode == "all":
-            # 모든 모드 결과 반환
             response = {
                 "query": query_text,
                 "classification": classification,
@@ -127,8 +105,7 @@ async def search_panels(search_query: SearchQuery):
                 "final_panel_ids": search_results['results']['weighted']['panel_ids'][:100]
             }
         else:
-            # 단일 모드 결과 반환
-            final_panel_ids = search_results['final_result']
+            final_panel_ids = search_results['final_panel_ids']
             match_scores = search_results['match_scores']
             
             response = {
@@ -161,8 +138,6 @@ async def search_panels(search_query: SearchQuery):
                 "final_panel_ids": final_panel_ids[:100]
             }
         
-        print(f"\n✅ 검색 완료")
-        
         return response
         
     except HTTPException as e:
@@ -173,15 +148,10 @@ async def search_panels(search_query: SearchQuery):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
 
-# ====================================================================
-# 2. 디버깅 API - 키워드 분류만 테스트
-# ====================================================================
 
 @app.post("/api/debug/classify")
 async def debug_classify(search_query: SearchQuery):
-    """
-    질의를 키워드로 분류만 하고 결과를 반환 (검색은 수행하지 않음)
-    """
+    """질의를 키워드로 분류만 하고 결과 반환 (검색 X)"""
     try:
         classification = classify_query_keywords(search_query.query)
         return {
@@ -191,15 +161,10 @@ async def debug_classify(search_query: SearchQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"분류 실패: {str(e)}")
 
-# ====================================================================
-# 3. 패널 상세 정보 조회 API
-# ====================================================================
 
 @app.get("/api/panels/{panel_id}")
 async def get_panel_details(panel_id: str):
-    """
-    특정 panel_id의 패널 상세 정보를 조회합니다.
-    """
+    """특정 panel_id의 패널 상세 정보 조회"""
     conn = None
     try:
         conn = get_db_connection()
@@ -208,7 +173,6 @@ async def get_panel_details(panel_id: str):
         
         cur = conn.cursor()
         
-        # Welcome 테이블에서 기본 정보 조회
         cur.execute("""
             SELECT panel_id, gender, birth_year, region, marital_status, 
                    income_personal_monthly, job_title_raw
@@ -242,9 +206,6 @@ async def get_panel_details(panel_id: str):
         if conn:
             conn.close()
 
-# ====================================================================
-# 4. 헬스체크
-# ====================================================================
 
 @app.get("/")
 def read_root():
@@ -254,11 +215,11 @@ def read_root():
         "status": "running"
     }
 
+
 @app.get("/health")
 def health_check():
     """시스템 상태 확인"""
     try:
-        # DB 연결 테스트
         conn = get_db_connection()
         db_status = "ok" if conn else "error"
         if conn:
