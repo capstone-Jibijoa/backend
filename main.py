@@ -11,13 +11,11 @@ from db_logic import log_search_query, get_db_connection
 # FastAPI 애플리케이션 초기화
 app = FastAPI(title="Multi-Table Hybrid Search API v3")
 
-# ====================================================================
-# 요청/응답 모델
-# ====================================================================
 
 class SearchQuery(BaseModel):
     query: str
-    search_mode: str = "all"  # 기본값: 모든 모드 결과 반환
+    search_mode: str = "all"
+
 
 class SearchResponse(BaseModel):
     query: str
@@ -43,10 +41,10 @@ class AnalysisResponse(BaseModel):
 @app.post("/api/search", response_model=SearchResponse)
 async def search_panels(search_query: SearchQuery):
     """
-    자연어 질의를 받아 Welcome/QPoll 테이블에서 하이브리드 검색을 수행합니다.
+    자연어 질의를 받아 Welcome/QPoll 하이브리드 검색 수행
     
     검색 모드:
-    - all (기본): 교집합, 합집합, 가중치 모두 반환 ⭐추천
+    - all (기본): 교집합, 합집합, 가중치 모두 반환
     - intersection: 교집합만 (모든 조건 만족)
     - union: 합집합만 (하나라도 조건 만족)
     - weighted: 가중치 기반만 (객관식 40%, 주관식 30%, QPoll 30%)
@@ -61,7 +59,6 @@ async def search_panels(search_query: SearchQuery):
     query_text = search_query.query
     search_mode = search_query.search_mode
     
-    # 검색 모드 검증
     valid_modes = ["all", "weighted", "union", "intersection"]
     if search_mode not in valid_modes:
         raise HTTPException(
@@ -80,7 +77,6 @@ async def search_panels(search_query: SearchQuery):
         classification = classify_query_keywords(query_text)
         
         # 2단계: 하이브리드 검색 수행
-        print("\n📌 2단계: 하이브리드 검색")
         search_results = hybrid_search(classification, search_mode=search_mode)
         
         # 3단계: 검색 로그 기록
@@ -93,7 +89,6 @@ async def search_panels(search_query: SearchQuery):
         
         # 4단계: 응답 구성
         if search_mode == "all":
-            # 모든 모드 결과 반환
             response = {
                 "query": query_text,
                 "classification": classification,
@@ -175,8 +170,6 @@ async def search_panels(search_query: SearchQuery):
                 },
                 "final_panel_ids": final_panel_ids[:100]
             }
-        
-        print(f"\n✅ 검색 완료")
         
         return response
         
@@ -356,11 +349,11 @@ def read_root():
         }
     }
 
+
 @app.get("/health")
 def health_check():
     """시스템 상태 확인"""
     try:
-        # DB 연결 테스트
         conn = get_db_connection()
         db_status = "ok" if conn else "error"
         if conn:
