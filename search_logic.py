@@ -1,5 +1,4 @@
 import os
-import json
 import re
 from typing import Optional, Tuple, List, Set
 from datetime import datetime
@@ -43,34 +42,20 @@ def initialize_embeddings():
     """KURE 임베딩 모델 초기화"""
     global EMBEDDINGS
     if EMBEDDINGS is None:
-        print("⏳ KURE 임베딩 모델 로딩 중...")
         EMBEDDINGS = HuggingFaceEmbeddings(
             model_name="nlpai-lab/KURE-v1",
             model_kwargs={'device': 'cpu'}
         )
-        print("✅ KURE 임베딩 모델 로드 완료")
     return EMBEDDINGS
 
 
 def extract_panel_id_from_payload(payload: dict) -> Optional[str]:
-    """Qdrant 페이로드에서 panel_id 추출"""
+    """Qdrant 페이로드에서 panel_id 추출 (Welcome용)"""
     try:
-        if 'metadata' in payload:
-            metadata = payload['metadata']
-            
-            if isinstance(metadata, dict):
-                panel_id = metadata.get('panel_id')
-                if panel_id:
-                    return str(panel_id)
-            
-            elif isinstance(metadata, str):
-                try:
-                    metadata_dict = json.loads(metadata)
-                    panel_id = metadata_dict.get('panel_id')
-                    if panel_id:
-                        return str(panel_id)
-                except json.JSONDecodeError:
-                    pass
+        if 'metadata' in payload and isinstance(payload['metadata'], dict):
+            panel_id = payload['metadata'].get('panel_id')
+            if panel_id:
+                return str(panel_id)
         
         panel_id = payload.get('panel_id')
         if panel_id:
@@ -276,41 +261,32 @@ def build_welcome_query_conditions(keywords: List[str]) -> Tuple[str, List]:
 def search_welcome_objective(keywords: List[str]) -> Set[str]:
     """Welcome 객관식 PostgreSQL 검색"""
     if not keywords:
+        print("   ⚠️  Welcome 객관식: 키워드 없음")
         return set()
     
     conn = None
     try:
         conn = get_db_connection()
         if not conn:
+            print("   ❌ Welcome 객관식: DB 연결 실패")
             return set()
         
         cur = conn.cursor()
-
-        # 테이블 전체 데이터 확인
-        cur.execute("SELECT COUNT(*) FROM welcome_meta2")
-        total_count = cur.fetchone()[0]
-        print(f"\n📊 welcome_meta2 테이블 전체 데이터: {total_count:,}개")
-
         where_clause, params = build_welcome_query_conditions(keywords)
         
         if not where_clause:
-            print("⚠️  Welcome 객관식: 매칭되는 조건 없음")
+            print("   ⚠️  Welcome 객관식: 조건 없음")
             return set()
         
         query = f"SELECT panel_id FROM welcome_meta2 {where_clause}"
-
-        print(f"\n🔍 Welcome 객관식 쿼리:")
-        print(f"   키워드: {keywords}")
-        print(f"   📝 파라미터: {params}")
-
         cur.execute(query, tuple(params))
         results = {str(row[0]) for row in cur.fetchall()}
         cur.close()
-        print(f"✅ Welcome 객관식 검색 결과: {len(results):,}개")
         
+        print(f"   ✅ Welcome 객관식: {len(results):,}명")
         return results
     except Exception as e:
-        print(f"Welcome 객관식 검색 실패: {e}")
+        print(f"   ❌ Welcome 객관식 검색 실패: {e}")
         return set()
     finally:
         if conn:
@@ -320,6 +296,7 @@ def search_welcome_objective(keywords: List[str]) -> Set[str]:
 def search_welcome_subjective(keywords: List[str]) -> Set[str]:
     """Welcome 주관식 Qdrant 검색"""
     if not keywords:
+        print("   ⚠️  Welcome 주관식: 키워드 없음")
         return set()
     
     try:
@@ -327,19 +304,19 @@ def search_welcome_subjective(keywords: List[str]) -> Set[str]:
         qdrant_client = get_qdrant_client()
         
         if not qdrant_client:
+            print("   ❌ Welcome 주관식: Qdrant 연결 실패")
             return set()
         
         query_text = " ".join(keywords)
         query_vector = embeddings.embed_query(query_text)
         collection_name = os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors")
-
-        print(f"🔍 Welcome 주관식 Qdrant 검색: '{query_text}'")
-        print(f"   컬렉션: {collection_name}")
         
         search_results = qdrant_client.search(
             collection_name=collection_name,
             query_vector=query_vector,
             limit=1000,
+            with_payload=True,
+            score_threshold=0.5
         )
         
         panel_ids = set()
@@ -347,56 +324,54 @@ def search_welcome_subjective(keywords: List[str]) -> Set[str]:
             panel_id = extract_panel_id_from_payload(result.payload)
             if panel_id:
                 panel_ids.add(panel_id)
-
-        print(f"   🔍 Qdrant 원본 검색 결과: {len(search_results)}개")
-        print(f"✅ Welcome 주관식 검색 결과: {len(panel_ids):,}개")
         
+        print(f"   ✅ Welcome 주관식: {len(panel_ids):,}명")
         return panel_ids
     except Exception as e:
-        print(f"Welcome 주관식 검색 실패: {e}")
+        print(f"   ❌ Welcome 주관식 검색 실패: {e}")
         return set()
 
 
 def search_welcome_two_stage(
     objective_keywords: List[str],
     subjective_keywords: List[str],
-    limit: int = 500
+    limit: int = 1000
 ) -> Set[str]:
     """2단계 하이브리드 검색"""
-
-    print(f"   1단계 키워드 : {objective_keywords}")
-    print(f"   2단계 키워드 (정교하게): {subjective_keywords}")
-
-    # 1단계: PostgreSQL 필터링
+    
+    print(f"\n🔍 2단계 검색 시작")
+    print(f"   1단계 키워드: {objective_keywords}")
+    print(f"   2단계 키워드: {subjective_keywords}")
+    
+    # 1단계: PostgreSQL
     panel_ids_stage1 = search_welcome_objective(objective_keywords)
     
     if not panel_ids_stage1:
-        print("⚠️  1단계 결과 없음")
+        print("   ⚠️  1단계 결과 없음 → 검색 종료")
         return set()
     
     if not subjective_keywords:
-        print("ℹ️  2단계 키워드 없음 → 1단계 결과 반환")
+        print("   ℹ️  2단계 키워드 없음 → 1단계 결과 반환")
         return panel_ids_stage1
     
-    # 2단계: Qdrant 벡터 검색
+    # 2단계: Qdrant
     try:
         embeddings = initialize_embeddings()
         qdrant_client = get_qdrant_client()
         
         if not qdrant_client:
-            print("⚠️  Qdrant 연결 실패 → 1단계 결과 반환")
+            print("   ⚠️  Qdrant 연결 실패 → 1단계 결과 반환")
             return panel_ids_stage1
         
         query_text = " ".join(subjective_keywords)
         query_vector = embeddings.embed_query(query_text)
         collection_name = os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors")
-
-        print(f"\n🔍 2단계 벡터 검색 시작")
-        print(f"   대상: {len(panel_ids_stage1):,}명 (1단계 결과)")
-          
+        
         panel_id_list = list(panel_ids_stage1)
         chunk_size = 1000
         all_results = []
+        
+        print(f"   🔄 청크 검색 시작 (대상: {len(panel_ids_stage1):,}명)")
         
         for i in range(0, len(panel_id_list), chunk_size):
             chunk = panel_id_list[i:i+chunk_size]
@@ -415,15 +390,18 @@ def search_welcome_two_stage(
                     collection_name=collection_name,
                     query_vector=query_vector,
                     query_filter=qdrant_filter,
-                    limit=min(limit, len(chunk))
+                    limit=min(limit, len(chunk)),
+                    score_threshold=0.3
                 )
                 
-                print(f"   ✅ 'metadata.panel_id' 필터로 검색: {len(results)}개")
+                if results:
+                    all_results.extend(results)
                 
-            except Exception as e1:
-                print(f"   ⚠️  'metadata.panel_id' 실패: {e1}")
-            
-            all_results.extend(results)
+            except Exception as e:
+                print(f"   ⚠️  청크 {i//chunk_size + 1} 검색 실패: {e}")
+                continue
+        
+        print(f"   📊 Qdrant 검색 결과: {len(all_results)}개")
         
         all_results.sort(key=lambda x: x.score, reverse=True)
         all_results = all_results[:limit]
@@ -434,19 +412,18 @@ def search_welcome_two_stage(
             if panel_id:
                 panel_ids_stage2.add(panel_id)
         
-        print(f"✅ 2단계 검색 완료: {len(panel_ids_stage2):,}명")
-        
+        print(f"   ✅ 2단계 최종 결과: {len(panel_ids_stage2):,}명")
         return panel_ids_stage2
+        
     except Exception as e:
-        print(f"2단계 검색 실패: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"   ❌ 2단계 검색 실패: {e}")
         return panel_ids_stage1
+
 
 def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
     """QPoll Qdrant 검색"""
     if not keywords:
-        print("⚠️  QPoll: 키워드 없음")
+        print("   ⚠️  QPoll: 키워드 없음")
         return set()
     
     try:
@@ -454,79 +431,34 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         qdrant_client = get_qdrant_client()
         
         if not qdrant_client:
-            print("❌ QPoll: Qdrant 클라이언트 연결 실패")
+            print("   ❌ QPoll: Qdrant 연결 실패")
             return set()
         
         query_text = " ".join(keywords)
         query_vector = embeddings.embed_query(query_text)
-        collection_name = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors")
+        collection_name = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vector_v2")
         
-        print(f"\n🔍 QPoll 검색 시작: '{query_text}'")
-        print(f"   컬렉션: {collection_name}")
-        
-        '''
-        if survey_type:
-            try:
-                qdrant_filter = Filter(
-                    must=[FieldCondition(key="survey_type", match={"value": survey_type})]
-                )
-                search_results = qdrant_client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    #query_filter=qdrant_filter,
-                    limit=1000,
-                )
-                print(f"   필터 적용: survey_type={survey_type}")
-            except Exception as e:
-                print(f"   ⚠️  필터 적용 실패: {e}")
-                search_results = qdrant_client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    limit=1000,
-                )
-        else:
-            search_results = qdrant_client.search(
-                collection_name=collection_name,
-                query_vector=query_vector,
-                limit=1000,
-            )
-        '''
-
         search_results = qdrant_client.search(
             collection_name=collection_name,
             query_vector=query_vector,
             limit=1000,
+            with_payload=True,
+            score_threshold=0.3
         )
         
-        print(f"   Qdrant 원본 검색 결과: {len(search_results)}개")
-
-        panel_ids = set()
-        '''
-        for result in search_results:
-            panel_id = extract_panel_id_from_payload(result.payload)
-            if panel_id:
-                panel_ids.add(panel_id)
-                success_count += 1
-            else:
-                fail_count += 1
-        '''
-
-        for result in search_results:
-            panel_id = result.payload.get('metadata', {}).get('panel_id')
-            # 최상위 panel_id 시도 (직접 저장 형식)
-            if panel_id is None:
-                panel_id = result.payload.get('panel_id') 
-            if panel_id:
-                panel_ids.add(panel_id)
+        print(f"   📊 Qdrant 검색 결과: {len(search_results)}개")
         
-
-        print(f"✅ QPoll 최종 검색 결과: {len(panel_ids):,}개\n")
+        panel_ids = set()
+        for result in search_results:
+            panel_id = result.payload.get('panel_id')
+            if panel_id:
+                panel_ids.add(str(panel_id))
+        
+        print(f"   ✅ QPoll: {len(panel_ids):,}명")
         return panel_ids
         
     except Exception as e:
-        print(f"❌ QPoll 검색 실패: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"   ❌ QPoll 검색 실패: {e}")
         return set()
 
 
@@ -537,6 +469,9 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
     
     use_two_stage = len(welcome_obj_keywords) > 0 and len(welcome_subj_keywords) > 0
     
+    print(f"\n📌 2단계: 하이브리드 검색")
+    print(f"   검색 전략: {'2단계 검색' if use_two_stage else '개별 검색'}")
+    
     if use_two_stage:
         panel_id1 = search_welcome_two_stage(
             objective_keywords=welcome_obj_keywords,
@@ -544,17 +479,33 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
         )
         panel_id2 = set()
     else:
-        panel_id1 = search_welcome_objective(welcome_obj_keywords)
-        panel_id2 = search_welcome_subjective(welcome_subj_keywords)
+        if welcome_obj_keywords:
+            print(f"\n🔍 Welcome 객관식 검색")
+            panel_id1 = search_welcome_objective(welcome_obj_keywords)
+        else:
+            panel_id1 = set()
+        
+        if welcome_subj_keywords:
+            print(f"\n🔍 Welcome 주관식 검색")
+            panel_id2 = search_welcome_subjective(welcome_subj_keywords)
+        else:
+            panel_id2 = set()
     
     qpoll_data = classified_keywords.get('qpoll_keywords', {})
     survey_type = qpoll_data.get('survey_type')
     qpoll_keywords = qpoll_data.get('keywords', [])
-    panel_id3 = search_qpoll(survey_type, qpoll_keywords)
+    
+    if qpoll_keywords:
+        print(f"\n🔍 QPoll 검색")
+        panel_id3 = search_qpoll(survey_type, qpoll_keywords)
+    else:
+        print(f"\n⚠️  QPoll: 키워드 없음")
+        panel_id3 = set()
     
     all_sets = [s for s in [panel_id1, panel_id2, panel_id3] if s]
     
     results = {}
+    
     # 교집합
     if not all_sets:
         intersection_panel_ids = []
@@ -572,6 +523,7 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
         'count': len(intersection_panel_ids),
         'scores': intersection_scores
     }
+    
     # 합집합
     if not all_sets:
         union_panel_ids = []
@@ -586,6 +538,7 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
         'count': len(union_panel_ids),
         'scores': union_scores
     }
+    
     # 가중치
     weights = {'panel_id1': 0.4, 'panel_id2': 0.3, 'panel_id3': 0.3}
     
@@ -614,21 +567,24 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
         'scores': weighted_scores,
         'weights': weights
     }
-
-    print("\n" + "="*70)
-    print("📊 검색 결과 요약")
-    print("="*70)
-    if use_two_stage:
-        print(f"Welcome 2단계 검색 (객관식→주관식): {len(panel_id1)}개")
-    else:
-        print(f"Welcome 객관식: {len(panel_id1)}개")
-        print(f"Welcome 주관식: {len(panel_id2)}개")
-    print(f"QPoll: {len(panel_id3)}개")
-    print(f"\n교집합: {results['intersection']['count']}개")
-    print(f"합집합: {results['union']['count']}개") 
-    print(f"가중치: {results['weighted']['count']}개")
-    print("="*70 + "\n")
     
+    # 최종 요약
+    print(f"\n{'='*70}")
+    print(f"📊 검색 결과 요약")
+    print(f"{'='*70}")
+    if use_two_stage:
+        print(f"Welcome 2단계: {len(panel_id1):,}명")
+    else:
+        print(f"Welcome 객관식: {len(panel_id1):,}명")
+        print(f"Welcome 주관식: {len(panel_id2):,}명")
+    print(f"QPoll: {len(panel_id3):,}명")
+    print(f"")
+    print(f"교집합: {results['intersection']['count']:,}명")
+    print(f"합집합: {results['union']['count']:,}명")
+    print(f"가중치: {results['weighted']['count']:,}명")
+    print(f"{'='*70}\n")
+    
+    # search_mode에 따른 최종 결과 선택
     if search_mode == 'intersection':
         final_panel_ids = results['intersection']['panel_ids']
         match_scores = results['intersection']['scores']
@@ -651,20 +607,3 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
         "results": results,
         "two_stage_used": use_two_stage
     }
-
-if __name__ == "__main__":
-    print("\n🧪 테스트: ['스트레스', '40대'. '패션']")
-    
-    test = {
-        "welcome_keywords": {
-            "objective": ["40대"],
-            "subjective": ["패션"]
-        },
-        "qpoll_keywords": {
-            "survey_type": None,
-            "keywords": ['스트레스']
-        }
-    }
-    
-    result = hybrid_search(test, search_mode="all")
-    print(f"\n✅ 최종 결과: {len(result['final_panel_ids'])}개")
