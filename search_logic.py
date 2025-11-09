@@ -462,7 +462,7 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         return set()
 
 
-def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
+def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Optional[int] = None) -> dict:
     """하이브리드 검색"""
     welcome_obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
     welcome_subj_keywords = classified_keywords.get('welcome_keywords', {}).get('subjective', [])
@@ -583,20 +583,66 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all") -> dict:
     print(f"합집합: {results['union']['count']:,}명")
     print(f"가중치: {results['weighted']['count']:,}명")
     print(f"{'='*70}\n")
-    
-    # search_mode에 따른 최종 결과 선택
-    if search_mode == 'intersection':
-        final_panel_ids = results['intersection']['panel_ids']
-        match_scores = results['intersection']['scores']
-    elif search_mode == 'union':
-        final_panel_ids = results['union']['panel_ids']
-        match_scores = results['union']['scores']
-    elif search_mode == 'weighted':
-        final_panel_ids = results['weighted']['panel_ids']
-        match_scores = results['weighted']['scores']
+
+    # 1. limit 값이 주어졌는지 확인
+    if limit is not None and limit > 0:
+        print(f"🎯 {limit}명 목표 충족 로직 실행...")
+        
+        final_panel_ids = []
+        match_scores = {}
+        added_panel_ids_set = set() # 중복 제외를 위한 Set
+        
+        # 교집합과 가중치 점수 맵을 가져옴
+        intersection_ids = results['intersection']['panel_ids']
+        weighted_scores_map = results['weighted']['scores']
+        
+        # 1순위: 교집합 결과
+        # (개선) 교집합 대상자 중에서도 '가중치 점수'가 높은 순으로 정렬
+        sorted_intersection_ids = sorted(
+            intersection_ids, 
+            key=lambda pid: weighted_scores_map.get(pid, 0), 
+            reverse=True
+        )
+        
+        for panel_id in sorted_intersection_ids:
+            if len(final_panel_ids) < limit:
+                final_panel_ids.append(panel_id)
+                added_panel_ids_set.add(panel_id)
+                match_scores[panel_id] = weighted_scores_map.get(panel_id, 0.0)
+            else:
+                break # 목표 달성 시 중단
+        
+        print(f"   1순위(교집합) 충족: {len(final_panel_ids):,} / {limit:,}명")
+
+        # 2순위: 가중치 결과 (교집합에서 추가된 인원 제외)
+        if len(final_panel_ids) < limit:
+            # 가중치 목록은 이미 점수순으로 정렬되어 있음
+            weighted_ids = results['weighted']['panel_ids']
+            
+            for panel_id in weighted_ids:
+                if len(final_panel_ids) >= limit:
+                    break # 목표 달성 시 중단
+                
+                # [중요] 1순위(교집합)에서 이미 추가된 ID는 건너뜀
+                if panel_id not in added_panel_ids_set:
+                    final_panel_ids.append(panel_id)
+                    added_panel_ids_set.add(panel_id) # (사실상 2순위에서는 set 추가가 필수는 아님)
+                    match_scores[panel_id] = weighted_scores_map.get(panel_id, 0.0)
+
+            print(f"   2순위(가중치) 충족: {len(final_panel_ids):,} / {limit:,}명")
+
+    # 2. limit 값이 없으면 기존 search_mode 로직 사용
     else:
-        final_panel_ids = results['weighted']['panel_ids']
-        match_scores = results['weighted']['scores']
+        print(f"ℹ️  Limit 미지정. '{search_mode}' 모드 결과 반환.")
+        if search_mode == 'intersection':
+            final_panel_ids = results['intersection']['panel_ids']
+            match_scores = results['intersection']['scores']
+        elif search_mode == 'union':
+            final_panel_ids = results['union']['panel_ids']
+            match_scores = results['union']['scores']
+        else: # 'weighted' 또는 'all' (default)
+            final_panel_ids = results['weighted']['panel_ids']
+            match_scores = results['weighted']['scores']
     
     return {
         "panel_id1": panel_id1,
