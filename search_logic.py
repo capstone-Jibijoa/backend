@@ -334,6 +334,7 @@ def search_welcome_subjective(keywords: List[str]) -> Set[str]:
         collection_name = os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors")
 
         print(f"🔍 Welcome 주관식 Qdrant 검색: '{query_text}'")
+        print(f"   컬렉션: {collection_name}")
         
         search_results = qdrant_client.search(
             collection_name=collection_name,
@@ -511,9 +512,13 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         '''
 
         for result in search_results:
-            panel_id = extract_panel_id_from_payload(result.payload)
+            panel_id = result.payload.get('metadata', {}).get('panel_id')
+            # 최상위 panel_id 시도 (직접 저장 형식)
+            if panel_id is None:
+                panel_id = result.payload.get('panel_id') 
             if panel_id:
                 panel_ids.add(panel_id)
+        
 
         print(f"✅ QPoll 최종 검색 결과: {len(panel_ids):,}개\n")
         return panel_ids
