@@ -20,7 +20,6 @@ class SearchResponse(BaseModel):
     final_panel_ids: list[str]
     summary: dict
 
-
 @app.post("/api/search", response_model=SearchResponse)
 async def search_panels(search_query: SearchQuery):
     """
@@ -31,6 +30,9 @@ async def search_panels(search_query: SearchQuery):
     - intersection: 교집합만 (모든 조건 만족)
     - union: 합집합만 (하나라도 조건 만족)
     - weighted: 가중치 기반 (객관 40%, 주관 30%, QPoll 30%)
+    
+    * 참고: 쿼리에 "NN명"이 포함되면 'limit'가 활성화되며,
+      search_mode와 관계없이 'quota' 우선순위(교집합 > 가중치)로 최종 결과 반환
     """
     query_text = search_query.query
     search_mode = search_query.search_mode
@@ -46,19 +48,37 @@ async def search_panels(search_query: SearchQuery):
         # 1단계: LLM 키워드 분류
         classification = classify_query_keywords(query_text)
         
-        # 2단계: 하이브리드 검색 수행
-        search_results = hybrid_search(classification, search_mode=search_mode)
+        # [신규] 1.5단계: 분류 결과에서 limit 값 추출
+        user_limit = classification.get('limit')
+        print(f"💡 API: 감지된 Limit 값: {user_limit}")
         
-        # 3단계: 검색 로그 기록
-        if search_mode == "all":
+        # [수정] 2단계: 하이브리드 검색 수행 (limit 인자 전달)
+        search_results = hybrid_search(
+            classification, 
+            search_mode=search_mode,
+            limit=user_limit
+        )
+        
+        # [수정] 3단계: 검색 로그 기록 (limit 우선 확인)
+        if user_limit is not None and user_limit > 0:
+            total_count = len(search_results['final_panel_ids'])
+        elif search_mode == "all":
             total_count = search_results['results']['union']['count']
         else:
-            total_count = len(search_results['final_panel_ids'])  
+            total_count = len(search_results['final_panel_ids']) 
         
         log_search_query(query_text, total_count)
         
-        # 4단계: 응답 구성
-        if search_mode == "all":
+        # 4단계: 응답 구성 (limit 우선 확인)
+        
+        # 사용자가 'limit'를 지정했다면, search_mode가 'all'이라도 
+        # 'quota' 모드(인원 수 우선순위)로 처리
+        effective_search_mode = search_mode
+        if user_limit is not None and user_limit > 0:
+            effective_search_mode = "quota"
+
+        # 'all' 모드이면서 'limit'가 *없을* 때만 3가지 모두 반환
+        if effective_search_mode == "all":
             response = {
                 "query": query_text,
                 "classification": classification,
@@ -102,8 +122,11 @@ async def search_panels(search_query: SearchQuery):
                         "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
                     }
                 },
+                # 'all' 모드의 기본값은 'weighted' 결과
                 "final_panel_ids": search_results['results']['weighted']['panel_ids'][:100]
             }
+        
+        # 'limit'가 있거나('quota'), 'all'이 아닌 search_mode일 때
         else:
             final_panel_ids = search_results['final_panel_ids']
             match_scores = search_results['match_scores']
@@ -117,8 +140,10 @@ async def search_panels(search_query: SearchQuery):
                     "qpoll_count": len(search_results['panel_id3'])
                 },
                 "results": {
-                    search_mode: {
+                    # effective_search_mode는 "quota", "intersection" 등이 됨
+                    effective_search_mode: {
                         "count": len(final_panel_ids),
+                        # 응답 반환 시 100개로 제한 (limit이 100보다 크더라도)
                         "panel_ids": final_panel_ids[:100],
                         "top_scores": {
                             str(panel_id): match_scores.get(panel_id, 0)
@@ -128,7 +153,7 @@ async def search_panels(search_query: SearchQuery):
                 },
                 "summary": {
                     "total_candidates": len(final_panel_ids),
-                    "search_mode": search_mode,
+                    "search_mode": effective_search_mode,
                     "search_strategy": {
                         "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
                         "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),

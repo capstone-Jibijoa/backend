@@ -108,6 +108,18 @@ def classify_query_keywords(query: str) -> dict:
 </query>
 """
 
+
+    # 인원 수(limit) 추출 로직 
+    limit_match = re.search(r'(\d+)\s*명', query)
+    limit_value = None
+    
+    if limit_match:
+        try:
+            limit_value = int(limit_match.group(1))
+            print(f"💡 인원 수 감지: {limit_value}명")
+        except ValueError:
+            pass
+
     user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
     
     try:
@@ -117,11 +129,9 @@ def classify_query_keywords(query: str) -> dict:
         ]
         response = CLAUDE_CLIENT.invoke(messages)
         
-        # JSON 추출
         text_output = response.content.strip()
         print(f"🔍 Claude 원본 응답:\n{text_output}\n{'='*50}")
         
-        # 코드 블록 제거
         code_block_pattern = r'^```(?:json)?\s*\n(.*?)\n```$'
         match = re.search(code_block_pattern, text_output, re.DOTALL | re.MULTILINE)
         
@@ -130,21 +140,20 @@ def classify_query_keywords(query: str) -> dict:
         
         text_output = text_output.strip('`').strip()
         
-        # JSON 파싱
         try:
             parsed = json.loads(text_output)
-            print(f"✅ 키워드 분류 성공")
-            print(f"Welcome 객관식: {parsed.get('welcome_keywords', {}).get('objective', [])}")
-            print(f"Welcome 주관식: {parsed.get('welcome_keywords', {}).get('subjective', [])}")
-            print(f"QPoll: {parsed.get('qpoll_keywords', {})}")
+
+            # 추출한 limit 값을 최종 JSON에 추가
+            parsed['limit'] = limit_value
             return parsed
             
         except json.JSONDecodeError as je:
             print(f"❌ JSON 파싱 실패: {je}")
-            # 중간 JSON 추출 시도
             json_match = re.search(r'\{.*\}', text_output, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group(0))
+                parsed_fallback = json.loads(json_match.group(0))
+                parsed_fallback['limit'] = limit_value
+                return parsed_fallback
             raise HTTPException(status_code=500, detail=f"Claude 응답 파싱 실패: {je.msg}")
             
     except HTTPException:
