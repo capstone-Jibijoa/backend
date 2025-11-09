@@ -20,7 +20,7 @@ class SearchResponse(BaseModel):
     query: str
     classification: dict
     results: dict
-    final_pids: list[int]
+    final_panel_ids: list[str]
     summary: dict
 
 # ====================================================================
@@ -40,9 +40,9 @@ async def search_panels(search_query: SearchQuery):
     
     프로세스:
     1. LLM이 질의를 Welcome(객관/주관)/QPoll 키워드로 분류
-    2. Welcome 객관식 → PostgreSQL 검색 (pid1)
-    3. Welcome 주관식 → Qdrant 임베딩 검색 (pid2)
-    4. QPoll → Qdrant 임베딩 검색 (pid3)
+    2. Welcome 객관식 → PostgreSQL 검색 (panel_id1)
+    3. Welcome 주관식 → Qdrant 임베딩 검색 (panel_id2)
+    4. QPoll → Qdrant 임베딩 검색 (panel_id3)
     5. 3가지 방식으로 결과 통합 및 정렬
     """
     query_text = search_query.query
@@ -85,34 +85,34 @@ async def search_panels(search_query: SearchQuery):
                 "query": query_text,
                 "classification": classification,
                 "source_counts": {
-                    "welcome_objective_count": len(search_results['pid1']),
-                    "welcome_subjective_count": len(search_results['pid2']),
-                    "qpoll_count": len(search_results['pid3'])
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
                 },
                 "results": {
                     "intersection": {
                         "count": search_results['results']['intersection']['count'],
-                        "pids": search_results['results']['intersection']['pids'][:100],
+                        "panel_ids": search_results['results']['intersection']['panel_ids'][:100],
                         "top_scores": {
-                            str(pid): search_results['results']['intersection']['scores'].get(pid, 0)
-                            for pid in search_results['results']['intersection']['pids'][:10]
+                            str(panel_id): search_results['results']['intersection']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['intersection']['panel_ids'][:10]
                         }
                     },
                     "union": {
                         "count": search_results['results']['union']['count'],
-                        "pids": search_results['results']['union']['pids'][:100],
+                        "panel_ids": search_results['results']['union']['panel_ids'][:100],
                         "top_scores": {
-                            str(pid): search_results['results']['union']['scores'].get(pid, 0)
-                            for pid in search_results['results']['union']['pids'][:10]
+                            str(panel_id): search_results['results']['union']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['union']['panel_ids'][:10]
                         }
                     },
                     "weighted": {
                         "count": search_results['results']['weighted']['count'],
-                        "pids": search_results['results']['weighted']['pids'][:100],
+                        "panel_ids": search_results['results']['weighted']['panel_ids'][:100],
                         "weights": search_results['results']['weighted']['weights'],
                         "top_scores": {
-                            str(pid): search_results['results']['weighted']['scores'].get(pid, 0)
-                            for pid in search_results['results']['weighted']['pids'][:10]
+                            str(panel_id): search_results['results']['weighted']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['weighted']['panel_ids'][:10]
                         }
                     }
                 },
@@ -124,33 +124,33 @@ async def search_panels(search_query: SearchQuery):
                         "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
                     }
                 },
-                "final_pids": search_results['results']['weighted']['pids'][:100]
+                "final_panel_ids": search_results['results']['weighted']['panel_ids'][:100]
             }
         else:
             # 단일 모드 결과 반환
-            final_pids = search_results['final_result']
+            final_panel_ids = search_results['final_result']
             match_scores = search_results['match_scores']
             
             response = {
                 "query": query_text,
                 "classification": classification,
                 "source_counts": {
-                    "welcome_objective_count": len(search_results['pid1']),
-                    "welcome_subjective_count": len(search_results['pid2']),
-                    "qpoll_count": len(search_results['pid3'])
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
                 },
                 "results": {
                     search_mode: {
-                        "count": len(final_pids),
-                        "pids": final_pids[:100],
+                        "count": len(final_panel_ids),
+                        "panel_ids": final_panel_ids[:100],
                         "top_scores": {
-                            str(pid): match_scores.get(pid, 0)
-                            for pid in final_pids[:10]
+                            str(panel_id): match_scores.get(panel_id, 0)
+                            for panel_id in final_panel_ids[:10]
                         }
                     }
                 },
                 "summary": {
-                    "total_candidates": len(final_pids),
+                    "total_candidates": len(final_panel_ids),
                     "search_mode": search_mode,
                     "search_strategy": {
                         "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
@@ -158,7 +158,7 @@ async def search_panels(search_query: SearchQuery):
                         "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
                     }
                 },
-                "final_pids": final_pids[:100]
+                "final_panel_ids": final_panel_ids[:100]
             }
         
         print(f"\n✅ 검색 완료")
@@ -195,10 +195,10 @@ async def debug_classify(search_query: SearchQuery):
 # 3. 패널 상세 정보 조회 API
 # ====================================================================
 
-@app.get("/api/panels/{pid}")
-async def get_panel_details(pid: int):
+@app.get("/api/panels/{panel_id}")
+async def get_panel_details(panel_id: str):
     """
-    특정 PID의 패널 상세 정보를 조회합니다.
+    특정 panel_id의 패널 상세 정보를 조회합니다.
     """
     conn = None
     try:
@@ -210,19 +210,19 @@ async def get_panel_details(pid: int):
         
         # Welcome 테이블에서 기본 정보 조회
         cur.execute("""
-            SELECT pid, gender, birth_year, region, marital_status, 
+            SELECT panel_id, gender, birth_year, region, marital_status, 
                    income_personal_monthly, job_title_raw
             FROM welcome 
-            WHERE pid = %s
-        """, (pid,))
+            WHERE panel_id = %s
+        """, (panel_id,))
         
         result = cur.fetchone()
         
         if not result:
-            raise HTTPException(status_code=404, detail=f"PID {pid}를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail=f"panel_id {panel_id}를 찾을 수 없습니다.")
         
         panel_data = {
-            "pid": result[0],
+            "panel_id": result[0],
             "gender": result[1],
             "birth_year": result[2],
             "region": result[3],
