@@ -21,54 +21,35 @@ def classify_query_keywords(query: str) -> dict:
     if CLAUDE_CLIENT is None:
         raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    system_prompt = """
+    system_prompt ="""
 사용자 쿼리를 분석하고 데이터베이스 검색 키워드로 분류하는 전문가입니다.
 
-사용자 쿼리:
-<query>
-{{QUERY}}
-</query>
+## 분류 기준
 
-## 분류 원칙
+**objective (구조화 필터)**: 넓은 그룹 분류 - 체크박스로 검색 가능
+- 인구통계: 지역, 연령대, 성별, 직업군
+- 경제: 소득수준, 차량보유
+- 라이프스타일: 흡연/음주 여부
 
-### objective (1차 필터 - 넓은 범위)
-**"어떤 그룹의 사람들인가?"**
-- 추상적 카테고리: 직장인, 학생, 주부, 고소득자, 저소득자
-- 인구통계: 지역, 연령대, 성별, 결혼여부, 가족구성
-- 일반 분류: 차량보유자, 흡연자, 음주자
+**subjective (벡터 검색)**: 구체적 특성 - 의미 유사도 검색
+- 브랜드/제품명, 세부 직무/전공, 기술/도구, 구체적 취향
 
-→ 체크박스나 선택지로 검색 가능한 **구조화된 데이터**
+**qpoll_keywords (설문 응답 검색)**: 3단계 구조
+1. 일반 카테고리 (필수)
+2. 대표 브랜드/제품
+3. 관련 행동/경험
 
-### subjective (2차 벡터 - 구체적 특성)
-**"그 그룹 안에서 어떤 세부 특징인가?"**
-- 구체적 브랜드/제품명
-- 세부 직무/전공분야
-- 특정 기술/도구/스킬
-- 구체적 취향/관심사
+## 판단 로직
+"10개 이상 큰 그룹으로 나눌 수 있는가?"
+→ YES: objective (예: 직장인, 30대, 서울)
+→ NO: subjective (예: 삼성, 커피, BMW)
 
-→ 자유 텍스트에서 **의미 유사도**로 검색하는 데이터
-
-## 판단 기준
-
-```
-질문 1: "이것으로 10개 이상 큰 그룹으로 나눌 수 있나?"
-YES → objective (예: 직장인, 20대, 서울, 고소득)
-NO → subjective (예: IT, 삼성, 커피, BMW)
-
-질문 2: "이것이 그룹 내 더 세밀한 구분인가?"
-YES → subjective
-NO → objective
-```
-
-## 출력 형식
-
-순수 JSON만 반환하세요:
-
+## 출력 (순수 JSON만)
 ```json
 {
   "welcome_keywords": {
     "objective": ["카테고리1", "카테고리2"],
-    "subjective": ["세부특징1", "세부특징2"]
+    "subjective": ["특징1", "특징2"]
   },
   "qpoll_keywords": {
     "survey_type": "주제 또는 null",
@@ -79,8 +60,7 @@ NO → objective
 
 ## 예시
 
-입력: "서울 30대 IT 직장인 100명"
-출력:
+쿼리: "서울 30대 IT 직장인 100명"
 ```json
 {
   "welcome_keywords": {
@@ -94,8 +74,7 @@ NO → objective
 }
 ```
 
-입력: "부산 40대 삼성폰 쓰는 고소득자 50명"
-출력:
+쿼리: "부산 40대 삼성폰 쓰는 고소득자 50명"
 ```json
 {
   "welcome_keywords": {
@@ -103,33 +82,30 @@ NO → objective
     "subjective": ["삼성폰"]
   },
   "qpoll_keywords": {
-    "survey_type": null,
-    "keywords": []
+    "survey_type": "전자기기",
+    "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
   }
 }
 ```
 
-입력: "전국 20대 개발자 커피 좋아하는 100명"
-출력:
+쿼리: "서울 경기 OTT 이용 젊은층 30명"
 ```json
 {
   "welcome_keywords": {
-    "objective": ["전국", "20대", "개발자"],
-    "subjective": ["커피"]
+    "objective": ["서울", "경기", "젊은층"],
+    "subjective": ["OTT"]
   },
   "qpoll_keywords": {
-    "survey_type": "음료",
-    "keywords": ["카페", "스타벅스", "아메리카노"]
+    "survey_type": "엔터테인먼트",
+    "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
   }
 }
 ```
 
-## 중요 규칙
-
-1. **넓은 그룹 = objective, 세부 구분 = subjective**
-2. **두 카테고리 모두 있어야 2단계 검색 작동**
-3. **순수 JSON만 반환 (마크다운, 설명 없음)**
-4. **해당 없으면 빈 배열 []**
+사용자 쿼리:
+<query>
+{{QUERY}}
+</query>
 """
 
     user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
@@ -178,22 +154,3 @@ NO → objective
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"API 오류: {str(e)}")
-
-# 테스트 코드
-if __name__ == "__main__":
-    test_queries = [
-        "서울 20대 남자 100명",
-        "경기 30~40대 남자 술을 먹은 사람 50명",
-        "서울, 경기 OTT 이용하는 젊은층 30명"
-    ]
-    
-    for query in test_queries:
-        print(f"\n{'='*60}")
-        print(f"테스트 쿼리: '{query}'")
-        print('='*60)
-        try:
-            result = classify_query_keywords(query)
-            print("\n✅ [성공]")
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        except Exception as e:
-            print(f"\n❌ [실패]: {e}")
