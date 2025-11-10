@@ -21,7 +21,7 @@ class SearchResponse(BaseModel):
     query: str
     classification: dict
     results: dict
-    final_panel_ids: list[int]
+    final_panel_ids: list[str]
     summary: dict
 
 class AnalysisRequest(BaseModel):
@@ -51,9 +51,9 @@ async def search_panels(search_query: SearchQuery):
     
     프로세스:
     1. LLM이 질의를 Welcome(객관/주관)/QPoll 키워드로 분류 + ranked_keywords 추출
-    2. Welcome 객관식 → PostgreSQL 검색 (pid1)
-    3. Welcome 주관식 → Qdrant 임베딩 검색 (pid2)
-    4. QPoll → Qdrant 임베딩 검색 (pid3)
+    2. Welcome 객관식 → PostgreSQL 검색 (panel_id1)
+    3. Welcome 주관식 → Qdrant 임베딩 검색 (panel_id2)
+    4. QPoll → Qdrant 임베딩 검색 (panel_id3)
     5. 3가지 방식으로 결과 통합 및 정렬
     * 참고: 쿼리에 "NN명"이 포함되면 'limit'가 활성화되며,
       search_mode와 관계없이 'quota' 우선순위(교집합 > 가중치)로 최종 결과 반환
@@ -100,6 +100,19 @@ async def search_panels(search_query: SearchQuery):
         log_search_query(query_text, total_count)
         
         # 4단계: 응답 구성 (limit 우선 확인)
+        # ✅ 프론트엔드 표시용 필드 추출 (ranked_keywords 기반)
+        display_fields = []
+        for kw_info in classification.get('ranked_keywords', [])[:3]:  # 상위 3개만
+            field = kw_info.get('field', '')
+            description = kw_info.get('description', '')
+            if field and description:
+                display_fields.append({
+                    'field': field,
+                    'label': description,
+                    'priority': kw_info.get('priority', 999)
+                })
+        
+
         
         # 사용자가 'limit'를 지정했다면, search_mode가 'all'이라도 
         # 'quota' 모드(인원 수 우선순위)로 처리
@@ -112,35 +125,36 @@ async def search_panels(search_query: SearchQuery):
             response = {
                 "query": query_text,
                 "classification": classification,
+                "display_fields": display_fields,  # ✅ 추가
                 "source_counts": {
-                    "welcome_objective_count": len(search_results['pid1']),
-                    "welcome_subjective_count": len(search_results['pid2']),
-                    "qpoll_count": len(search_results['pid3'])
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
                 },
                 "results": {
                     "intersection": {
                         "count": search_results['results']['intersection']['count'],
-                        "pids": search_results['results']['intersection']['pids'][:100],
+                        "panel_ids": search_results['results']['intersection']['panel_ids'][:100],
                         "top_scores": {
-                            str(pid): search_results['results']['intersection']['scores'].get(pid, 0)
-                            for pid in search_results['results']['intersection']['pids'][:10]
+                            str(panel_id): search_results['results']['intersection']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['intersection']['panel_ids'][:10]
                         }
                     },
                     "union": {
                         "count": search_results['results']['union']['count'],
-                        "pids": search_results['results']['union']['pids'][:100],
+                        "panel_ids": search_results['results']['union']['panel_ids'][:100],
                         "top_scores": {
-                            str(pid): search_results['results']['union']['scores'].get(pid, 0)
-                            for pid in search_results['results']['union']['pids'][:10]
+                            str(panel_id): search_results['results']['union']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['union']['panel_ids'][:10]
                         }
                     },
                     "weighted": {
                         "count": search_results['results']['weighted']['count'],
-                        "pids": search_results['results']['weighted']['pids'][:100],
+                        "panel_ids": search_results['results']['weighted']['panel_ids'][:100],
                         "weights": search_results['results']['weighted']['weights'],
                         "top_scores": {
-                            str(pid): search_results['results']['weighted']['scores'].get(pid, 0)
-                            for pid in search_results['results']['weighted']['pids'][:10]
+                            str(panel_id): search_results['results']['weighted']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['weighted']['panel_ids'][:10]
                         }
                     }
                 },
@@ -166,10 +180,11 @@ async def search_panels(search_query: SearchQuery):
             response = {
                 "query": query_text,
                 "classification": classification,
+                "display_fields": display_fields,  # ✅ 추가
                 "source_counts": {
-                    "welcome_objective_count": len(search_results['pid1']),
-                    "welcome_subjective_count": len(search_results['pid2']),
-                    "qpoll_count": len(search_results['pid3'])
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
                 },
                 "results": {
                     # effective_search_mode는 "quota", "intersection" 등이 됨
@@ -178,8 +193,8 @@ async def search_panels(search_query: SearchQuery):
                         # 응답 반환 시 100개로 제한 (limit이 100보다 크더라도)
                         "panel_ids": final_panel_ids[:100],
                         "top_scores": {
-                            str(pid): match_scores.get(pid, 0)
-                            for pid in final_panel_ids[:10]
+                            str(panel_id): match_scores.get(panel_id, 0)
+                            for panel_id in final_panel_ids[:10]
                         }
                     }
                 },
@@ -210,79 +225,210 @@ async def search_panels(search_query: SearchQuery):
 # 2. 검색 + 분석 통합 API (NEW!)
 # ====================================================================
 
-@app.post("/api/search-and-analyze", response_model=AnalysisResponse)
+@app.post("/api/search-and-analyze")
 async def search_and_analyze(request: AnalysisRequest):
     """
     자연어 질의를 받아 검색 + 분석을 한 번에 수행합니다.
     
-    프로세스:
-    1. 키워드 분류 (LLM) - ranked_keywords 추출
-    2. 하이브리드 검색 수행
-    3. 검색 결과 분석 및 차트 데이터 생성 (LLM 없음, Python만 사용)
-       - ranked_keywords 상위 2개로 차트 생성 (전체 DB 기반)
-       - 높은 비율(70%↑) 필드 추가 차트 생성 (검색 결과 기반)
-       - 최대 5개 차트 반환
+    search_panels()와 동일한 검색 로직 + 차트 데이터 추가
     
-    Args:
-        query: 자연어 질의
-        search_mode: weighted(권장) / union / intersection
+    프로세스:
+    1. LLM 키워드 분류 (ranked_keywords 포함)
+    2. 하이브리드 검색 수행 (search_panels와 동일)
+    3. 검색 결과 반환 (search_panels와 동일)
+    4. 차트 데이터 생성 및 추가 (신규)
     
     Returns:
-        {
-            "query": "...",
-            "total_count": 5210,
-            "main_summary": "...",
-            "charts": [...]
-        }
+        search_panels 응답 + charts 필드
     """
+    query_text = request.query
+    search_mode = request.search_mode
+    
+    valid_modes = ["all", "weighted", "union", "intersection"]
+    if search_mode not in valid_modes:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid search_mode. Must be one of: {valid_modes}"
+        )
+    
     try:
-        query_text = request.query
-        search_mode = request.search_mode
-        
         print(f"\n{'='*70}")
         print(f"🔍 검색+분석 요청: {query_text}")
         print(f"📊 검색 모드: {search_mode}")
         print(f"{'='*70}\n")
         
-        # 1단계: 키워드 분류 (ranked_keywords 포함)
+        # ============================================================
+        # 1~4단계: search_panels()와 동일
+        # ============================================================
+        
+        # 1단계: LLM 키워드 분류 (ranked_keywords 포함)
         print("📌 1단계: LLM 키워드 분류")
         classification = classify_query_keywords(query_text)
         
-        # 2단계: 하이브리드 검색
-        print("\n📌 2단계: 하이브리드 검색")
-        search_results = hybrid_search(classification, search_mode=search_mode)
+        # 1.5단계: 분류 결과에서 limit 값 추출
+        user_limit = classification.get('limit')
+        print(f"💡 API: 감지된 Limit 값: {user_limit}")
         
-        # PID 리스트 추출
-        if search_mode == "all":
-            pid_list = search_results['results']['weighted']['pids']
-        else:
-            pid_list = search_results['final_panel_ids']
-        
-        # 로그 기록
-        log_search_query(query_text, len(pid_list))
-        
-        # 3단계: 분석 수행 (LLM 없음, ranked_keywords 사용)
-        print("\n📌 3단계: 결과 분석")
-        analysis_result, status_code = analyze_search_results(
-            query_text,
-            classification,  # ranked_keywords 포함
-            pid_list
+        # 2단계: 하이브리드 검색 수행 (limit 인자 전달)
+        search_results = hybrid_search(
+            classification, 
+            search_mode=search_mode,
+            limit=user_limit
         )
         
-        if status_code != 200:
-            raise HTTPException(status_code=status_code, detail=analysis_result.get('error', '분석 실패'))
+        # 3단계: 검색 로그 기록 (limit 우선 확인)
+        if user_limit is not None and user_limit > 0:
+            total_count = len(search_results['final_panel_ids'])
+        elif search_mode == "all":
+            total_count = search_results['results']['union']['count']
+        else:
+            total_count = len(search_results['final_panel_ids']) 
+        
+        log_search_query(query_text, total_count)
+        
+        # 4단계: 응답 구성 (search_panels와 동일)
+        
+        # 프론트엔드 표시용 필드 추출 (ranked_keywords 기반)
+        display_fields = []
+        for kw_info in classification.get('ranked_keywords', [])[:3]:
+            field = kw_info.get('field', '')
+            description = kw_info.get('description', '')
+            if field and description:
+                display_fields.append({
+                    'field': field,
+                    'label': description,
+                    'priority': kw_info.get('priority', 999)
+                })
+        
+        # 사용자가 'limit'를 지정했다면 'quota' 모드로 처리
+        effective_search_mode = search_mode
+        if user_limit is not None and user_limit > 0:
+            effective_search_mode = "quota"
+
+        # 'all' 모드이면서 'limit'가 없을 때만 3가지 모두 반환
+        if effective_search_mode == "all":
+            response = {
+                "query": query_text,
+                "classification": classification,
+                "display_fields": display_fields,
+                "source_counts": {
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
+                },
+                "results": {
+                    "intersection": {
+                        "count": search_results['results']['intersection']['count'],
+                        "panel_ids": search_results['results']['intersection']['panel_ids'][:100],
+                        "top_scores": {
+                            str(panel_id): search_results['results']['intersection']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['intersection']['panel_ids'][:10]
+                        }
+                    },
+                    "union": {
+                        "count": search_results['results']['union']['count'],
+                        "panel_ids": search_results['results']['union']['panel_ids'][:100],
+                        "top_scores": {
+                            str(panel_id): search_results['results']['union']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['union']['panel_ids'][:10]
+                        }
+                    },
+                    "weighted": {
+                        "count": search_results['results']['weighted']['count'],
+                        "panel_ids": search_results['results']['weighted']['panel_ids'][:100],
+                        "weights": search_results['results']['weighted']['weights'],
+                        "top_scores": {
+                            str(panel_id): search_results['results']['weighted']['scores'].get(panel_id, 0)
+                            for panel_id in search_results['results']['weighted']['panel_ids'][:10]
+                        }
+                    }
+                },
+                "summary": {
+                    "search_mode": search_mode,
+                    "search_strategy": {
+                        "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
+                        "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
+                        "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+                    },
+                    "ranked_keywords": classification.get('ranked_keywords', [])
+                },
+                "final_panel_ids": search_results['results']['weighted']['panel_ids'][:100]
+            }
+            # panel_id 리스트 (차트 생성용)
+            panel_id_list = search_results['results']['weighted']['panel_ids']
+        
+        else:
+            # 단일 모드 결과 반환
+            final_panel_ids = search_results['final_panel_ids']
+            match_scores = search_results['match_scores']
+            
+            response = {
+                "query": query_text,
+                "classification": classification,
+                "display_fields": display_fields,
+                "source_counts": {
+                    "welcome_objective_count": len(search_results['panel_id1']),
+                    "welcome_subjective_count": len(search_results['panel_id2']),
+                    "qpoll_count": len(search_results['panel_id3'])
+                },
+                "results": {
+                    effective_search_mode: {
+                        "count": len(final_panel_ids),
+                        "panel_ids": final_panel_ids[:100],
+                        "top_scores": {
+                            str(panel_id): match_scores.get(panel_id, 0)
+                            for panel_id in final_panel_ids[:10]
+                        }
+                    }
+                },
+                "summary": {
+                    "total_candidates": len(final_panel_ids),
+                    "search_mode": effective_search_mode,
+                    "search_strategy": {
+                        "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
+                        "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
+                        "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
+                    },
+                    "ranked_keywords": classification.get('ranked_keywords', [])
+                },
+                "final_panel_ids": final_panel_ids[:100]
+            }
+            # panel_id 리스트 (차트 생성용)
+            panel_id_list = final_panel_ids
+        
+        # ============================================================
+        # 5단계: 차트 데이터 생성 및 추가 (신규)
+        # ============================================================
+        
+        print("\n📌 5단계: 차트 데이터 생성")
+        analysis_result, status_code = analyze_search_results(
+            query_text,
+            classification,
+            panel_id_list
+        )
+        
+        if status_code == 200:
+            # ✅ 차트 데이터를 response에 추가
+            response['charts'] = analysis_result.get('charts', [])
+            response['analysis_summary'] = analysis_result.get('main_summary', '')
+            print(f"✅ 차트 {len(response['charts'])}개 생성 완료")
+        else:
+            # 분석 실패 시 빈 차트 반환
+            response['charts'] = []
+            response['analysis_summary'] = '차트 생성 실패'
+            print(f"⚠️  차트 생성 실패")
         
         print(f"\n✅ 검색+분석 완료")
         
-        return analysis_result
+        return response
         
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        raise e
     except Exception as e:
         print(f"❌ 검색+분석 실패: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"오류 발생: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
 
 # ====================================================================
 # 3. 디버깅 API - 키워드 분류만 테스트
@@ -307,10 +453,10 @@ async def debug_classify(search_query: SearchQuery):
 # 4. 패널 상세 정보 조회 API
 # ====================================================================
 
-@app.get("/api/panels/{pid}")
-async def get_panel_details(pid: int):
+@app.get("/api/panels/{panel_id}")
+async def get_panel_details(panel_id: int):
     """
-    특정 PID의 패널 상세 정보를 조회합니다.
+    특정 panel_id의 패널 상세 정보를 조회합니다.
     """
     conn = None
     try:
@@ -322,20 +468,20 @@ async def get_panel_details(pid: int):
         
         # welcome_meta2 테이블에서 기본 정보 조회
         cur.execute("""
-            SELECT pid, structured_data
+            SELECT panel_id, structured_data
             FROM welcome_meta2 
-            WHERE pid = %s
-        """, (pid,))
+            WHERE panel_id = %s
+        """, (panel_id,))
         
         result = cur.fetchone()
         
         if not result:
-            raise HTTPException(status_code=404, detail=f"PID {pid}를 찾을 수 없습니다.")
+            raise HTTPException(status_code=404, detail=f"panel_id {panel_id}를 찾을 수 없습니다.")
         
-        pid_value, structured_data = result
+        panel_id_value, structured_data = result
         
         # JSONB 데이터 평탄화
-        panel_data = {"pid": pid_value}
+        panel_data = {"panel_id": panel_id_value}
         if isinstance(structured_data, dict):
             panel_data.update(structured_data)
         
@@ -369,7 +515,7 @@ def read_root():
             "search": "/api/search",
             "search_and_analyze": "/api/search-and-analyze (추천!)",
             "classify": "/api/debug/classify",
-            "panel_detail": "/api/panels/{pid}",
+            "panel_detail": "/api/panels/{panel_id}",
             "health": "/health"
         }
     }
@@ -393,61 +539,3 @@ def health_check():
             "status": "unhealthy",
             "error": str(e)
         }
-    
-if __name__ == "__main__":
-    print("\n" + "="*80)
-    print("🔬 `/api/search-and-analyze` 핵심 로직 직접 호출 테스트 시작")
-    print("="*80)
-
-    # 1. 테스트 쿼리 및 모드 설정
-    test_query = "30대 직장인이 출퇴근 시 사용하는 대중교통 관련 문항의 트렌드"
-    test_mode = "weighted"
-    
-    try:
-        # 1단계: 키워드 분류 (hybrid_logic)
-        classification = classify_query_keywords(test_query)
-        print(f"✅ 1단계 분류 완료. 랭크 키워드: {classification.get('ranked_keywords', [])[:3]}")
-
-        # 2단계: 하이브리드 검색 (search_logic)
-        search_results = hybrid_search(classification, search_mode=test_mode)
-        pid_list = search_results['final_panel_ids']
-        print(f"✅ 2단계 검색 완료. 결과 PID {len(pid_list)}개 확보.")
-
-        # 3단계: 로그 기록
-        log_search_query(test_query, len(pid_list))
-        
-        # 4단계: 분석 수행 (analysis_logic)
-        analysis_result, status_code = analyze_search_results(
-            test_query,
-            classification,
-            pid_list
-        )
-
-        if status_code == 200:
-            print("\n✅ 4단계 분석 성공. 통합 테스트 최종 성공.")
-            print(f"   - 총 결과 수: {analysis_result.get('total_count')}개")
-            print(f"   - 주요 요약 (부분): {analysis_result.get('main_summary', 'N/A')[:40]}...")
-            print(f"   - 차트 개수: {len(analysis_result.get('charts', []))}개")
-            for i, chart in enumerate(analysis_result.get('charts', []), 1):
-                print(f"\n[차트 {i}]")
-                print(f"  제목: {chart.get('topic')}")
-                print(f"  설명: {chart.get('description')}")
-                print(f"  비율: {chart.get('ratio')}")
-                print(f"  차트 데이터:")
-                for chart_item in chart.get('chart_data', []):
-                    print(f"    라벨: {chart_item.get('label')}")
-                    print(f"    값:")
-                    for key, value in chart_item.get('values', {}).items():
-                        print(f"      - {key}: {value}%")
-            
-            print("\n" + "="*70)
-            print("📋 전체 결과 JSON")
-            print("="*70)
-            print(json.dumps(analysis_result, indent=2, ensure_ascii=False))
-        else:
-            print(f"\n❌ 4단계 분석 실패. 상태 코드: {status_code}, 오류: {analysis_result.get('error', 'N/A')}")
-
-    except Exception as e:
-        print(f"\n🛑 통합 테스트 중 오류 발생: {type(e).__name__} - {e}")
-        import traceback
-        traceback.print_exc()

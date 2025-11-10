@@ -436,7 +436,7 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         
         query_text = " ".join(keywords)
         query_vector = embeddings.embed_query(query_text)
-        collection_name = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vector_v2")
+        collection_name = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2")
         
         search_results = qdrant_client.search(
             collection_name=collection_name,

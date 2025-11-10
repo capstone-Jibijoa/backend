@@ -29,6 +29,7 @@ def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 
         elif keyword in ['서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종',
                         '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주']:
             regions.append(keyword)
+        
         elif '대' in keyword and keyword[:-1].isdigit():
             age_prefix = int(keyword[:-1])
             birth_start = current_year - age_prefix - 9
@@ -106,6 +107,19 @@ WELCOME_OBJECTIVE_FIELDS = [
 ]
 
 FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
+
+# ✅ 분석에서 제외할 raw 필드 (데이터가 너무 다양하거나 품질이 낮음)
+EXCLUDED_RAW_FIELDS = {
+    'job_title_raw',
+    'job_duty_raw',
+    'phone_brand_raw',
+    'phone_model_raw',
+    'car_manufacturer_raw',
+    'car_model_raw',
+    'smoking_brand_etc_raw',
+    'smoking_brand_other_details_raw',
+    'drinking_experience_other_details_raw'
+}
 
 def get_all_panels_data_from_db(limit: int = None) -> List[Dict]:
     """전체 패널 데이터 조회 (panel_id는 문자열)"""

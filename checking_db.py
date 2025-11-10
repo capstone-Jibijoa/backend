@@ -33,7 +33,7 @@ def check_database_structure():
         print("\n📋 1. welcome_meta2 테이블 기본 정보:")
         print("-" * 70)
         
-        cur.execute("SELECT COUNT(*) FROM welcome_meta")
+        cur.execute("SELECT COUNT(*) FROM welcome_meta2")
         total_count = cur.fetchone()[0]
         print(f"총 레코드 수: {total_count:,}개")
         
@@ -84,7 +84,7 @@ def check_database_structure():
                     SELECT 
                         structured_data->>'gender' as gender,
                         COUNT(*) as count
-                    FROM welcome_meta
+                    FROM welcome_meta2
                     GROUP BY structured_data->>'gender'
                 """)
                 print("\n[성별 분포]")
@@ -97,7 +97,7 @@ def check_database_structure():
                     SELECT 
                         structured_data->>'region' as region,
                         COUNT(*) as count
-                    FROM welcome_meta
+                    FROM welcome_meta2
                     GROUP BY structured_data->>'region'
                     ORDER BY count DESC
                     LIMIT 5
@@ -119,7 +119,7 @@ def check_database_structure():
                             ELSE '60대 이상'
                         END as age_group,
                         COUNT(*) as count
-                    FROM welcome_meta
+                    FROM welcome_meta2
                     WHERE structured_data->>'birth_year' IS NOT NULL
                     GROUP BY age_group
                     ORDER BY age_group
@@ -138,7 +138,7 @@ def check_database_structure():
                     structured_data->>'gender' as gender,
                     structured_data->>'birth_year' as birth_year,
                     structured_data->>'region' as region
-                FROM welcome_meta
+                FROM welcome_meta2
                 LIMIT 3
             """)
             
@@ -164,7 +164,7 @@ def check_database_structure():
         # 경기 거주자 검색 테스트
         cur.execute("""
             SELECT COUNT(*) 
-            FROM welcome_meta
+            FROM welcome_meta2
             WHERE structured_data->>'region' = '경기'
         """)
         test_count = cur.fetchone()[0]
@@ -178,10 +178,10 @@ def check_database_structure():
         print("="*70)
         
         print("\n✅ 이미 수정된 사항:")
-        print("1. 테이블 이름: welcome → welcome_meta")
+        print("1. 테이블 이름: welcome → welcome_meta2")
         print("2. JSONB 접근: structured_data->>'필드명'")
-        print("3. Qdrant 컬렉션: QDRANT_COLLECTION_NAME 환경변수 사용")
-        print("4. 주관식/QPoll: 같은 컬렉션(welcome_subjective_vectors) 사용")
+        print("3. Qdrant 컬렉션: QDRANT_COLLECTION_WELCOME_NAME, QDRANT_COLLECTION_QPOLL_NAME 환경변수 사용")
+        print("4. 주관식/QPoll: 각각 welcome_subjective_vectors, qpoll_vector_v2 사용")
         
         print("\n🚀 바로 사용 가능합니다!")
         print("   테스트 명령어:")
