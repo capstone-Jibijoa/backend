@@ -21,7 +21,7 @@ def classify_query_keywords(query: str) -> dict:
     if CLAUDE_CLIENT is None:
         raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    system_prompt ="""
+    system_prompt = system_prompt ="""
 사용자 쿼리를 분석하고 데이터베이스 검색 키워드로 분류하는 전문가입니다.
 
 ## 분류 기준
@@ -39,6 +39,24 @@ def classify_query_keywords(query: str) -> dict:
 2. 대표 브랜드/제품
 3. 관련 행동/경험
 
+**ranked_keywords (우선순위 키워드)** ✅ 신규 추가
+- 주요 검색 조건 3개를 우선순위순으로 나열
+- 각 키워드에 대응하는 DB 필드명 포함
+- 프론트엔드 테이블 컬럼 표시 순서 결정용
+
+## 필드 매핑 규칙 ✅ 신규 추가
+- 서울/경기/부산 등 → region_minor (거주 지역)
+- 20대/30대/40대 등 → birth_year (연령대)
+- 남자/여자/남성/여성 → gender (성별)
+- 직장인/학생 등 → job_title_raw (직업)
+- 고소득/저소득 → income_personal_monthly (소득)
+- 미혼/기혼 → marital_status (결혼 여부)
+- 흡연/비흡연 → smoking_experience (흡연 경험)
+- 음주/금주 → drinking_experience (음주 경험)
+- 차량보유/차없음 → car_ownership (차량 보유)
+- IT/마케팅 등 구체적 직무 → job_duty_raw (직무)
+- 기타 브랜드/제품명 → 해당 필드 또는 null
+
 ## 판단 로직
 "10개 이상 큰 그룹으로 나눌 수 있는가?"
 → YES: objective (예: 직장인, 30대, 서울)
@@ -54,7 +72,12 @@ def classify_query_keywords(query: str) -> dict:
   "qpoll_keywords": {
     "survey_type": "주제 또는 null",
     "keywords": ["키워드1", "키워드2"]
-  }
+  },
+  "ranked_keywords": [
+    {"keyword": "키워드1", "field": "필드명", "description": "한글 설명", "priority": 1},
+    {"keyword": "키워드2", "field": "필드명", "description": "한글 설명", "priority": 2},
+    {"keyword": "키워드3", "field": "필드명", "description": "한글 설명", "priority": 3}
+  ]
 }
 ```
 
@@ -70,7 +93,12 @@ def classify_query_keywords(query: str) -> dict:
   "qpoll_keywords": {
     "survey_type": null,
     "keywords": []
-  }
+  },
+  "ranked_keywords": [
+    {"keyword": "서울", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "30대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "IT", "field": "job_duty_raw", "description": "직무", "priority": 3}
+  ]
 }
 ```
 
@@ -84,21 +112,31 @@ def classify_query_keywords(query: str) -> dict:
   "qpoll_keywords": {
     "survey_type": "전자기기",
     "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
-  }
+  },
+  "ranked_keywords": [
+    {"keyword": "부산", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "40대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "고소득", "field": "income_personal_monthly", "description": "소득", "priority": 3}
+  ]
 }
 ```
 
-쿼리: "서울 경기 OTT 이용 젊은층 30명"
+쿼리: "서울 OTT 사용하는 40~50대 남성" ✅ 연령대 통합 예시
 ```json
 {
   "welcome_keywords": {
-    "objective": ["서울", "경기", "젊은층"],
+    "objective": ["서울", "40~50대", "남성"],
     "subjective": ["OTT"]
   },
   "qpoll_keywords": {
     "survey_type": "엔터테인먼트",
     "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
-  }
+  },
+  "ranked_keywords": [
+    {"keyword": "서울", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "40~50대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "남성", "field": "gender", "description": "성별", "priority": 3}
+  ]
 }
 ```
 
@@ -121,7 +159,7 @@ def classify_query_keywords(query: str) -> dict:
             pass
 
     user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
-    
+   
     try:
         messages = [
             SystemMessage(content=system_prompt),
@@ -134,10 +172,10 @@ def classify_query_keywords(query: str) -> dict:
         
         code_block_pattern = r'^```(?:json)?\s*\n(.*?)\n```$'
         match = re.search(code_block_pattern, text_output, re.DOTALL | re.MULTILINE)
-        
+       
         if match:
             text_output = match.group(1).strip()
-        
+       
         text_output = text_output.strip('`').strip()
         
         try:
@@ -146,7 +184,7 @@ def classify_query_keywords(query: str) -> dict:
             # 추출한 limit 값을 최종 JSON에 추가
             parsed['limit'] = limit_value
             return parsed
-            
+           
         except json.JSONDecodeError as je:
             print(f"❌ JSON 파싱 실패: {je}")
             json_match = re.search(r'\{.*\}', text_output, re.DOTALL)
@@ -155,7 +193,7 @@ def classify_query_keywords(query: str) -> dict:
                 parsed_fallback['limit'] = limit_value
                 return parsed_fallback
             raise HTTPException(status_code=500, detail=f"Claude 응답 파싱 실패: {je.msg}")
-            
+           
     except HTTPException:
         raise
     except Exception as e:
