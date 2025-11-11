@@ -7,11 +7,24 @@ from hybrid_logic import classify_query_keywords  # 키워드 분류 (ranked_key
 from search_logic import hybrid_search  # 통합 검색 함수
 from analysis_logic import analyze_search_results  # LLM 없는 분석 함수
 from db_logic import log_search_query, get_db_connection
+from fastapi.middleware.cors import CORSMiddleware # 1. 임포트
 
 # FastAPI 애플리케이션 초기화
 app = FastAPI(title="Multi-Table Hybrid Search API v3")
 
+origins = [
+    "http://localhost:5173",  # 👈 방금 에러에 나온 그 주소!
+    "http://localhost:3000",  # (혹시 다른 포트도 쓴다면)
+    # "https://your-frontend-domain.com", # (나중에 배포할 실제 도메인)
+]
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # 👈 이 리스트를 사용
+    allow_credentials=True,
+    allow_methods=["*"],       # POST, GET 등 모든 메소드 허용
+    allow_headers=["*"],       # Content-Type 등 모든 헤더 허용
+)
 class SearchQuery(BaseModel):
     query: str
     search_mode: str = "all"
@@ -454,7 +467,7 @@ async def debug_classify(search_query: SearchQuery):
 # ====================================================================
 
 @app.get("/api/panels/{panel_id}")
-async def get_panel_details(panel_id: int):
+async def get_panel_details(panel_id: str):
     """
     특정 panel_id의 패널 상세 정보를 조회합니다.
     """
