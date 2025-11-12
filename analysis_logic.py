@@ -17,7 +17,8 @@ from utils import (
     WELCOME_OBJECTIVE_FIELDS,
     EXCLUDED_RAW_FIELDS,
     get_panels_data_from_db,
-    get_all_panels_data_from_db
+    get_all_panels_data_from_db,
+    get_db_distribution
 )
 
 
@@ -101,78 +102,69 @@ def create_chart_data(
     max_categories: int = 10
 ) -> Dict:
     """
-    특정 키워드/필드에 대한 차트 데이터 생성
-    
-    Args:
-        keyword: 키워드
-        field_name: 필드명
-        korean_name: 한글명
-        panels_data: 검색된 패널 데이터 (use_full_db=True면 사용 안 함)
-        use_full_db: True면 전체 DB 데이터로 분석
-        max_categories: 차트에 표시할 최대 카테고리 수 (기본 10개)
-    
-    Returns:
-        {
-            "topic": "차트 제목",
-            "description": "설명",
-            "ratio": "XX.X%",
-            "chart_data": [{"label": "...", "values": {...}}]
-        }
+    특정 키워드/필드에 대한 차트 데이터 생성 (버그 수정됨)
     """
-    # 전체 DB 기반 분석 옵션
+    
+    final_distribution = {}
+    description_prefix = ""
+
     if use_full_db:
-        print(f"      → 전체 DB 데이터로 '{field_name}' 분석")
-        full_data = get_all_panels_data_from_db()
-        if not full_data:
+        print(f"DB에서 직접 '{field_name}' 집계")
+        final_distribution = get_db_distribution(field_name) 
+        
+        description_prefix = f"전체 데이터 기준 '{keyword}' 분석:"
+        
+        if not final_distribution:
             return {
                 "topic": korean_name,
-                "description": f"'{keyword}' 관련 전체 데이터를 조회할 수 없습니다.",
+                "description": f"'{keyword}' 관련 전체 데이터를 DB에서 집계할 수 없습니다.",
                 "ratio": "0.0%",
                 "chart_data": []
             }
-        analysis_data = full_data
-        description_prefix = f"전체 데이터 기준 '{keyword}' 분석:"
+
     else:
         analysis_data = panels_data
         description_prefix = f"'{keyword}' 검색 결과:"
-    
-    # 필드 값 추출
-    values = extract_field_values(analysis_data, field_name)
-    
-    if not values:
-        return {
-            "topic": korean_name,
-            "description": f"'{keyword}' 관련 데이터가 부족합니다.",
-            "ratio": "0.0%",
-            "chart_data": []
-        }
-    
-    # 분포 계산
-    distribution = calculate_distribution(values)
+        
+        # 필드값 추출
+        values = extract_field_values(analysis_data, field_name)
+        
+        if not values:
+            return {
+                "topic": korean_name,
+                "description": f"'{keyword}' 관련 데이터가 부족합니다.",
+                "ratio": "0.0%",
+                "chart_data": []
+            }
+        
+        # 분포 계산
+        distribution = calculate_distribution(values)
 
-    # ✅ 1단계: 0% 비율 항목 필터링
-    filtered_distribution = {k: v for k, v in distribution.items() if v > 0.0}
-    
-    if not filtered_distribution:
-        return {
-            "topic": korean_name,
-            "description": f"'{keyword}' 관련 데이터가 부족합니다.",
-            "ratio": "0.0%",
-            "chart_data": []
-        }
-    
-    # ✅ 2단계: 너무 많은 카테고리는 상위 N개만 + 기타로 묶기
-    if len(filtered_distribution) > max_categories:
-        sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
-        top_items = dict(sorted_items[:max_categories - 1])
-        other_sum = sum(v for k, v in sorted_items[max_categories - 1:])
-        if other_sum > 0:
-            top_items['기타'] = round(other_sum, 1)
-        final_distribution = top_items
-        print(f"      → {len(filtered_distribution)}개 카테고리 중 상위 {max_categories}개만 표시")
-    else:
-        final_distribution = filtered_distribution
-    
+        # 0% 비율 항목 필터링
+        filtered_distribution = {k: v for k, v in distribution.items() if v > 0.0}
+        
+        if not filtered_distribution:
+            return {
+                "topic": korean_name,
+                "description": f"'{keyword}' 관련 데이터가 부족합니다.",
+                "ratio": "0.0%",
+                "chart_data": []
+            }
+        
+        # 너무 많은 카테고리는 상위 N개만 + 기타로 묶기
+        if len(filtered_distribution) > max_categories:
+            sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
+            top_items = dict(sorted_items[:max_categories - 1])
+            other_sum = sum(v for k, v in sorted_items[max_categories - 1:])
+            if other_sum > 0:
+                top_items['기타'] = round(other_sum, 1)
+            final_distribution = top_items
+            print(f"      → {len(filtered_distribution)}개 카테고리 중 상위 {max_categories}개만 표시")
+        else:
+            final_distribution = filtered_distribution
+        
+
+
     top_category, top_ratio = find_top_category(final_distribution)
     
     # 차트 데이터 생성

@@ -407,7 +407,7 @@ async def search_and_analyze(request: AnalysisRequest):
                 "final_panel_ids": final_panel_ids[:100]
             }
             # panel_id 리스트 (차트 생성용)
-            panel_id_list = final_panel_ids
+            panel_id_list = final_panel_ids[:5000]
         
         # ============================================================
         # 5단계: 차트 데이터 생성 및 추가 (신규)

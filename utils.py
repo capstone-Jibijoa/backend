@@ -4,6 +4,91 @@
 from collections import Counter
 from typing import List, Dict, Any, Tuple
 import re
+from db_logic import get_db_connection
+from typing import Dict, List, Any # 상단에 추가
+import datetime
+
+def get_db_distribution(field_name: str) -> Dict[str, float]:
+    """
+    DB에서 직접 필드 분포를 집계합니다.
+    """
+    conn = None
+    total_count = 0
+    distribution = {}
+    
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+        cur = conn.cursor()
+
+        query = ""
+        total_count_query = ""
+        
+        # 1. 필드별로 SQL 쿼리 분기
+        if field_name == "birth_year":
+            # 1-1. 'birth_year' (나이) 처리
+            current_year = datetime.datetime.now().year # ✅ 동적 연도 계산
+            
+            total_count_query = "SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'birth_year' ~ '^[0-9]+$'"
+            
+            query = f"""
+                SELECT 
+                    CASE
+                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 20 THEN '10대'
+                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 30 THEN '20대'
+                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 40 THEN '30대'
+                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 50 THEN '40대'
+                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 60 THEN '50대'
+                        ELSE '60대 이상'
+                    END as item,
+                    COUNT(*) as count
+                FROM welcome_meta2
+                WHERE structured_data->>'birth_year' ~ '^[0-9]+$'
+                GROUP BY item
+                ORDER BY item
+            """
+        
+        else:
+            # 1-2. 'gender', 'region_major' 등 그 외 필드 처리
+            total_count_query = f"SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL"
+            
+            query = f"""
+                SELECT 
+                    structured_data->>'{field_name}' as item, 
+                    COUNT(*) as count
+                FROM welcome_meta2
+                WHERE structured_data->>'{field_name}' IS NOT NULL
+                GROUP BY item
+                ORDER BY count DESC
+            """
+        
+        # 2. 쿼리 실행 (공통 로직)
+        
+        # 2-1. 전체 카운트
+        cur.execute(total_count_query)
+        total_count = cur.fetchone()[0]
+        
+        if total_count == 0:
+            cur.close()
+            return {}
+
+        # 2-2. 분포 쿼리
+        cur.execute(query)
+        rows = cur.fetchall()
+        cur.close()
+        
+        # 3. 백분율로 변환
+        distribution = {str(item): round((count / total_count) * 100, 1) for item, count in rows}
+        return distribution
+        
+    except Exception as e:
+        # field_name을 포함하여 에러 로그 출력
+        print(f"❌ DB 집계 실패 ({field_name}): {e}")
+        return {}
+    finally:
+        if conn:
+            conn.close()
 
 def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 2025) -> Tuple[str, List[Any]]:
     """키워드 리스트를 SQL WHERE 조건으로 변환"""
