@@ -109,6 +109,10 @@ def create_chart_data(
     description_prefix = ""
 
     if use_full_db:
+        # ============================================
+        # 1. [DB 집계 경로] (use_full_db = True)
+        #    - DB에서 'final_distribution'을 직접 받아옵니다.
+        # ============================================
         print(f"DB에서 직접 '{field_name}' 집계")
         final_distribution = get_db_distribution(field_name) 
         
@@ -121,10 +125,14 @@ def create_chart_data(
                 "ratio": "0.0%",
                 "chart_data": []
             }
+        # (DB 집계 경로는 여기서 끝입니다. 'final_distribution'이 설정되었습니다.)
 
     else:
+
         analysis_data = panels_data
         description_prefix = f"'{keyword}' 검색 결과:"
+        
+        # --- 'values'를 사용하는 모든 로직이 이 'else' 블록 안에 있어야 합니다 ---
         
         # 필드값 추출
         values = extract_field_values(analysis_data, field_name)
