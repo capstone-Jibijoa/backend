@@ -1,34 +1,33 @@
-# db_logic.py (최종 버전: JSONB 쿼리 및 안전한 파라미터 전달)
-
 import os
 import psycopg2
 from dotenv import load_dotenv
-import json
-from qdrant_client import QdrantClient, models
-from qdrant_client.models import PointStruct, VectorParams, Distance, NamedVector
-from qdrant_client.models import Filter, FieldCondition, MatchAny, ScoredPoint
+from qdrant_client import QdrantClient
 
 load_dotenv()
 
 # =======================================================
-# 0. Qdrant 클라이언트 초기화
+# 1. Qdrant 클라이언트
 # =======================================================
+
 def get_qdrant_client():
     """Qdrant 클라이언트를 생성하고 반환합니다."""
     try:
-        # 환경 변수에서 Qdrant 호스트와 포트를 가져옵니다.
-        client = QdrantClient(host=os.getenv("QDRANT_HOST"), port=os.getenv("QDRANT_PORT"))
-        print("Qdrant 클라이언트 연결 성공!")
+        client = QdrantClient(
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", 6333))
+        )
+        print("✅ Qdrant 클라이언트 연결 성공")
         return client
     except Exception as e:
-        print(f"Qdrant 클라이언트 연결 실패: {e}")
+        print(f"❌ Qdrant 클라이언트 연결 실패: {e}")
         return None
-# =======================================================
-# 1. DB 연결 및 테이블 생성 함수 (로직 유지)
-# =======================================================
-def get_db_connection():
-    """데이터베이스에 연결하고 연결 객체를 반환합니다."""
 
+# =======================================================
+# 2. PostgreSQL 연결
+# =======================================================
+
+def get_db_connection():
+    """PostgreSQL 데이터베이스에 연결하고 연결 객체를 반환합니다."""
     try:
         conn = psycopg2.connect(
             host=os.getenv("DB_HOST"),
@@ -38,7 +37,7 @@ def get_db_connection():
         )
         return conn
     except psycopg2.Error as e:
-        print(f"데이터베이스 연결 실패: {e}")
+        print(f"❌ 데이터베이스 연결 실패: {e}")
         return None
     
 # DB에 저장된 실제 소득 문자열 목록 (순서대로)
@@ -87,104 +86,141 @@ def _build_income_sql_clause(key: str, operator: str, value: int) -> (str, tuple
     return sql_clause, params
 
 # =======================================================
-# 2. 유틸리티 함수 (PostgreSQL WHERE 절 변환)
-# =======================================================
-def _build_jsonb_where_clause(structured_condition_json_str: str) -> tuple[str, list]:
-    """
-    Claude로부터 받은 JSON 문자열 필터를 PostgreSQL JSONB WHERE 절과 
-    psycopg2 파라미터 리스트로 변환하여 SQL 인젝션을 방지합니다.
-    (소득 필터 특별 처리 및 structured_data 참조)
-    """
-    try:
-        filters = json.loads(structured_condition_json_str)
-    except json.JSONDecodeError:
-        print(f"경고: 잘못된 JSON 필터 수신: {structured_condition_json_str}")
-        return "", []
-
-    conditions = []
-    params = []
-    
-    for f in filters:
-        key = f.get("key")
-        operator = f.get("operator")
-        value = f.get("value")
-
-        if not key or not operator or value is None:
-            continue
-
-        # ✅ [수정] 'ai_insights'가 아닌 'structured_data'를 참조합니다.
-        jsonb_access = f"structured_data->>'{key}'"
-
-        # ⭐️ [핵심] 소득(Income) 필터 인터셉터
-        if key == "income_monthly" and operator in ["GT", "GTE", "LT", "LTE", "EQ"]:
-            try:
-                numeric_val = int(value) 
-                sql_clause, params_tuple = _build_income_sql_clause(key, operator, numeric_val)
-                # sql_clause에는 이미 (structured_data ->> %s ...)가 포함되어 있음
-                conditions.append(sql_clause)
-                params.extend(params_tuple)
-            except (ValueError, TypeError):
-                # 값이 숫자가 아닌 경우 (예: "월300~399만원")
-                conditions.append(f" ({jsonb_access} = %s) ")
-                params.append(value)
-        
-        # ⭐️ 그 외 모든 일반 필터
-        elif operator == "EQ":
-            conditions.append(f" {jsonb_access} = %s ")
-            params.append(value)
-        
-        elif operator == "BETWEEN" and isinstance(value, list) and len(value) == 2:
-            # 'int' 대신 'numeric'이 더 안전 (예: 출생연도)
-            conditions.append(f" ({jsonb_access})::numeric BETWEEN %s AND %s ") 
-            params.extend(value) 
-            
-        elif operator == "GT":
-            conditions.append(f" ({jsonb_access})::numeric > %s ")
-            params.append(value)
-            
-        elif operator == "LT":
-            conditions.append(f" ({jsonb_access})::numeric < %s ")
-            params.append(value)
-
-        elif operator == "IN" and isinstance(value, list):
-            # (이 로직은 프롬프트가 IN을 반환할 경우를 대비해 유지)
-            if not value: continue
-            placeholders = ", ".join(["%s"] * len(value))
-            conditions.append(f" {jsonb_access} IN ({placeholders}) ")
-            params.extend(value)
-
-    if not conditions:
-        return "", []
-
-    # 모든 조건을 AND로 연결하고 ' WHERE ' 구문 추가
-    return " WHERE " + " AND ".join(conditions), params
-
-# =======================================================
-# 4. 검색 로그 기록 함수
+# 3. 검색 로그 기록 (권한 에러 처리 개선)
 # =======================================================
 def log_search_query(query: str, results_count: int, user_uid: int = None):
+    """
+    사용자의 검색 활동을 데이터베이스에 기록합니다.
+    
+    ✅ 개선: 권한 에러 시 조용히 실패 (서비스 중단 방지)
+    
+    Args:
+        query: 검색 질의 텍스트
+        results_count: 검색 결과 개수
+        user_uid: 사용자 UID (선택)
+        
+    Returns:
+        log_id: 기록된 로그의 ID (실패 시 None)
+    """
     conn = None
     try:
         conn = get_db_connection()
-        if conn:
-            cur = conn.cursor()
-            cur.execute(
-                "INSERT INTO search_log (query, results_count, uid) VALUES (%s, %s, %s) RETURNING id",
-                (query, results_count, user_uid)
+        if not conn:
+            return None
+        
+        cur = conn.cursor()
+        
+        # ✅ search_log 테이블이 있는지 먼저 확인
+        cur.execute("""
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = 'search_log'
             )
-            log_id = cur.fetchone()[0]
-            conn.commit()
+        """)
+        
+        table_exists = cur.fetchone()[0]
+        
+        if not table_exists:
+            print("⚠️  search_log 테이블이 존재하지 않습니다. 로그를 건너뜁니다.")
             cur.close()
-            return log_id
-    except Exception as e:
-        print(f"검색 로그 기록 실패: {e}")
+            return None
+        
+        # 로그 기록 시도
+        cur.execute(
+            """
+            INSERT INTO search_log (query, results_count, uid, created_at) 
+            VALUES (%s, %s, %s, NOW()) 
+            RETURNING id
+            """,
+            (query, results_count, user_uid)
+        )
+        
+        log_id = cur.fetchone()[0]
+        conn.commit()
+        cur.close()
+        
+        # 성공 시에만 출력 (조용히)
+        # print(f"✅ 검색 로그 기록 완료 (ID: {log_id})")
+        return log_id
+        
+    except psycopg2.errors.InsufficientPrivilege as e:
+        # ✅ 권한 에러는 무시하고 계속 진행
+        print(f"⚠️  검색 로그 기록 권한 없음 (무시하고 계속)")
+        if conn:
+            conn.rollback()
         return None
+        
+    except psycopg2.Error as e:
+        # ✅ 다른 DB 에러도 조용히 처리
+        print(f"⚠️  검색 로그 기록 실패: {e} (무시하고 계속)")
+        if conn:
+            conn.rollback()
+        return None
+        
+    except Exception as e:
+        # ✅ 예상치 못한 에러도 조용히 처리
+        print(f"⚠️  검색 로그 기록 중 예외: {e} (무시하고 계속)")
+        if conn:
+            conn.rollback()
+        return None
+        
     finally:
         if conn:
             conn.close()
 
-if __name__ == "__main__":
-    if get_db_connection():
-        create_tables()
-    else:
-        print("데이터베이스 연결 실패로 인해 테이블을 생성할 수 없습니다.")
+# =======================================================
+# 4. search_log 테이블 생성 (옵션)
+# =======================================================
+
+def create_search_log_table():
+    """
+    search_log 테이블이 없으면 생성합니다.
+    권한이 있을 때만 사용하세요.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            print("❌ DB 연결 실패")
+            return False
+        
+        cur = conn.cursor()
+        
+        # 테이블 생성
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS search_log (
+                id SERIAL PRIMARY KEY,
+                query TEXT NOT NULL,
+                results_count INTEGER,
+                uid INTEGER,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        
+        # 인덱스 생성
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_search_log_created_at 
+            ON search_log(created_at)
+        """)
+        
+        conn.commit()
+        cur.close()
+        
+        print("✅ search_log 테이블 생성 완료")
+        return True
+        
+    except psycopg2.errors.InsufficientPrivilege:
+        print("❌ 테이블 생성 권한이 없습니다")
+        if conn:
+            conn.rollback()
+        return False
+        
+    except Exception as e:
+        print(f"❌ 테이블 생성 실패: {e}")
+        if conn:
+            conn.rollback()
+        return False
+        
+    finally:
+        if conn:
+            conn.close()

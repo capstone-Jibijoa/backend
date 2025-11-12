@@ -1,99 +1,167 @@
 import os
 import json
+import re
 from dotenv import load_dotenv
-from datetime import datetime # 👈 현재 연도를 가져오기 위해 추가
+from datetime import datetime
 from fastapi import HTTPException
-from langchain_anthropic import ChatAnthropic # 👈 LangChain의 Anthropic 래퍼 사용
-from langchain_core.messages import SystemMessage, HumanMessage # 👈 메시지 객체 임포트
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 
-# =======================================================
-# 1. claude 모델을 모듈 수준에서 한 번만 초기화한다.
-# =======================================================
+# Claude 모델 초기화
 try:
-
-    my_api_key = os.getenv("ANTHROPIC_API_KEY")
-
-    CLAUDE_CLIENT = ChatAnthropic(
-        model="claude-opus-4-1",
-        temperature=0.4,
-        api_key=my_api_key
-    )
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1)
 except Exception as e:
     CLAUDE_CLIENT = None
-    print(f"Anthropic 클라이언트 생성 실패: {e}") # 모델과 동일한 패턴으로 유지
+    print(f"Anthropic 클라이언트 생성 실패: {e}")
 
-# 하이브리드 검색을 위한 질의 분리 함수
-def split_query_for_hybrid_search(query: str) -> dict:
-    """
-    Claude API를 이용해 질의를 정형(Structured Filter)과 비정형(Semantic Keyword)으로 분리합니다.
-    """
-    if CLAUDE_CLIENT is None:
-        raise HTTPException(status_code=500, detail="Anthropic Claude 클라이언트가 초기화되지 않았습니다.")
-
-    current_year = datetime.now().year # 👈 동적으로 현재 연도 가져오기
-
-    # =======================================================
-    # 프롬프트 디테일 강화 (오차 최소화) 적용 부분
-    # =======================================================
-    system_prompt = """
-    당신은 사용자 질의를 하이브리드 검색에 사용될 JSON 객체로 변환하는 최고 전문가입니다.
-**응답은 오직 하나의 완벽한 JSON 객체** 형태로만 반환해야 하며, 어떤 추가 설명이나 문장도 포함해서는 안 됩니다.
-**현재 데이터 샘플은 최대 150개**이므로, target_count는 150을 초과하지 않도록 엄격하게 제한해야 합니다.
-
-[핵심 규칙]
-1. **정형 조건 (filters)**: '지역', '성별', '나이', '소득', '직무' 등 명확한 속성 필터는 'filters' 배열에 객체 형태로 변환하세요.
-    - 각 필터 객체는 다음과 같은 키-값 쌍을 가져야 합니다:
-
-[데이터 샘플] (최대 150명)
-- gender: 성별 (예: 'M', 'F')
-- birth_year: 출생연도
-- region_major / region_minor: 거주 지역 (예: '경기', '화성시')
-- marital_status: 결혼 여부
-- children_count: 자녀 수
-- family_size: 가족 구성 인원
-- education_level: 최종 학력
-- job_title_raw / job_duty: 직종 및 직무
-- income_personal_monthly / income_household_monthly: 개인 및 가구 월소득
-- owned_electronics: 보유 가전제품 리스트
-- phone_brand / phone_model_raw: 휴대폰 제조사 및 모델
-- car_ownership / car_manufacturer: 자동차 보유 여부 및 제조사
-- smoking_experience / drinking_experience: 흡연 및 음주 경험
-
-   - **값 표준화**: 
-     a. **나이 변환**: 나이(예: 30~40대)는 **현재 연도({current_year}년)**를 기준으로 출생 연도(birth_year)의 **BETWEEN** 범위(예: [{current_year}-49, {current_year}-30])로 변환하세요.
-     b. **성별 변환**: '남자', '여자'만 사용하세요.
-     c. **누락 처리**: 정형 조건에 해당하는 내용이 없으면 'filters' 배열은 빈 리스트(`[]`)로 반환하세요.
-     
-2. **비정형 조건 (semantic_query)**: 의미론적 검색어는 'semantic_query' 필드에 담으세요.
-   - **[매우 중요] 핵심 키워드 추출**: 'semantic_query'는 **KURE 임베딩에 바로 사용할 핵심 명사/구문**만 남기고 불필요한 관형어나 문장 성분(예: '추천해줘', '찾아줘' 등)은 **모두 제거**해야 합니다.
+def classify_query_keywords(query: str) -> dict:
    
-3. **목표 수량 (target_count)**: 쿼리에 'n명', 'top k'와 같은 목표 수량이 있으면 숫자로 반환하세요. 없으면 `null`로 반환하세요. **150을 초과하지 않도록** 하세요.
+    if CLAUDE_CLIENT is None:
+        raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-[출력 스키마 예시]
-// 입력 쿼리 예시: '경기 30~40대 남자 술을 먹은 사람 50명'
-{{
-  "target_count": 50,
-  "filters": [
-    {{ "key": "region_major", "operator": "EQ", "value": "경기" }},
-    {{ "key": "birth_year", "operator": "BETWEEN", "value": [1985, 1995] }}, 
-    {{ "key": "gender", "operator": "EQ", "value": "남자" }},
-    {{ "key": "drinking_experience", "operator": "EQ", "value": "경험 있음" }}
-  ],
-  "semantic_query": "" // 이 쿼리에는 비정형 조건이 없으므로 빈 문자열 반환
-}}
-""".format(current_year=current_year) # 👈 프롬프트에 현재 연도 포맷팅
+    system_prompt = system_prompt ="""
+사용자 쿼리를 분석하고 데이터베이스 검색 키워드로 분류하는 전문가입니다.
+
+## 분류 기준
+
+**objective (구조화 필터)**: 넓은 그룹 분류 - 체크박스로 검색 가능
+- 인구통계: 지역, 연령대, 성별, 직업군
+- 경제: 소득수준, 차량보유
+- 라이프스타일: 흡연/음주 여부
+
+**subjective (벡터 검색)**: 구체적 특성 - 의미 유사도 검색
+- 브랜드/제품명, 세부 직무/전공, 기술/도구, 구체적 취향
+
+**qpoll_keywords (설문 응답 검색)**: 3단계 구조
+1. 일반 카테고리 (필수)
+2. 대표 브랜드/제품
+3. 관련 행동/경험
+
+**ranked_keywords (우선순위 키워드)** ✅ 신규 추가
+- 주요 검색 조건 3개를 우선순위순으로 나열
+- 각 키워드에 대응하는 DB 필드명 포함
+- 프론트엔드 테이블 컬럼 표시 순서 결정용
+
+## 필드 매핑 규칙 ✅ 신규 추가
+- 서울/경기/부산 등 → region_major (거주 지역)
+- 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
+- 20대/30대/40대 등 → birth_year (연령대)
+- 남자/여자/남성/여성 → gender (성별)
+- 직장인/학생 등 → job_title_raw (직업)
+- 고소득/저소득 → income_personal_monthly (소득)
+- 미혼/기혼 → marital_status (결혼 여부)
+- 흡연/비흡연 → smoking_experience (흡연 경험)
+- 음주/금주 → drinking_experience (음주 경험)
+- 차량보유/차없음 → car_ownership (차량 보유)
+- IT/마케팅 등 구체적 직무 → job_duty_raw (직무)
+- 기타 브랜드/제품명 → 해당 필드 또는 null
+
+## 판단 로직
+"10개 이상 큰 그룹으로 나눌 수 있는가?"
+→ YES: objective (예: 직장인, 30대, 서울)
+→ NO: subjective (예: 삼성, 커피, BMW)
+
+## 출력 (순수 JSON만)
+```json
+{
+  "welcome_keywords": {
+    "objective": ["카테고리1", "카테고리2"],
+    "subjective": ["특징1", "특징2"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "주제 또는 null",
+    "keywords": ["키워드1", "키워드2"]
+  },
+  "ranked_keywords": [
+    {"keyword": "키워드1", "field": "필드명", "description": "한글 설명", "priority": 1},
+    {"keyword": "키워드2", "field": "필드명", "description": "한글 설명", "priority": 2},
+    {"keyword": "키워드3", "field": "필드명", "description": "한글 설명", "priority": 3}
+  ]
+}
+```
+
+## 예시
+
+쿼리: "서울 30대 IT 직장인 100명"
+```json
+{
+  "welcome_keywords": {
+    "objective": ["서울", "30대", "직장인"],
+    "subjective": ["IT"]
+  },
+  "qpoll_keywords": {
+    "survey_type": null,
+    "keywords": []
+  },
+  "ranked_keywords": [
+    {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
+    {"keyword": "30대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "IT", "field": "job_duty_raw", "description": "직무", "priority": 3}
+  ]
+}
+```
+
+쿼리: "부산 40대 삼성폰 쓰는 고소득자 50명"
+```json
+{
+  "welcome_keywords": {
+    "objective": ["부산", "40대", "고소득자"],
+    "subjective": ["삼성폰"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "전자기기",
+    "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
+  },
+  "ranked_keywords": [
+    {"keyword": "부산", "field": "region_major", "description": "거주 지역", "priority": 1},
+    {"keyword": "40대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "고소득", "field": "income_personal_monthly", "description": "소득", "priority": 3}
+  ]
+}
+```
+
+쿼리: "서울 OTT 사용하는 40~50대 남성" ✅ 연령대 통합 예시
+```json
+{
+  "welcome_keywords": {
+    "objective": ["서울", "40~50대", "남성"],
+    "subjective": ["OTT"]
+  },
+  "qpoll_keywords": {
+    "survey_type": "엔터테인먼트",
+    "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
+  },
+  "ranked_keywords": [
+    {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
+    {"keyword": "40~50대", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "남성", "field": "gender", "description": "성별", "priority": 3}
+  ]
+}
+```
+
+사용자 쿼리:
+<query>
+{{QUERY}}
+</query>
+"""
+
+
+    # 인원 수(limit) 추출 로직 
+    limit_match = re.search(r'(\d+)\s*명', query)
+    limit_value = None
     
-    user_prompt = f"""
-    다음 쿼리를 분석하여 JSON 형식으로 반환하세요.
-    쿼리: '{query}'
-    """
-    
+    if limit_match:
+        try:
+            limit_value = int(limit_match.group(1))
+            print(f"💡 인원 수 감지: {limit_value}명")
+        except ValueError:
+            pass
+
+    user_prompt = f"다음 질의를 분석하세요:\n\n{query}"
+   
     try:
-      # 🌟 Anthropic SDK messages.create 호출
-      # 💡 최종 수정: invoke에 문자열 대신, SystemMessage와 HumanMessage 객체 리스트를 전달합니다.
-      # 이 방식이 모델의 역할을 명확히 하여 안정성을 높입니다.
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)
@@ -101,37 +169,36 @@ def split_query_for_hybrid_search(query: str) -> dict:
         response = CLAUDE_CLIENT.invoke(messages)
         
         text_output = response.content.strip()
-        parsed = json.loads(text_output)
+        print(f"🔍 Claude 원본 응답:\n{text_output}\n{'='*50}")
         
-        # 반환 구조는 이전 단계에서 정의된 대로 유지 (JSON 문자열로 반환)
-        filters = parsed.get("filters", []) 
-        semantic = parsed.get("semantic_query", "").strip()
+        code_block_pattern = r'^```(?:json)?\s*\n(.*?)\n```$'
+        match = re.search(code_block_pattern, text_output, re.DOTALL | re.MULTILINE)
+       
+        if match:
+            text_output = match.group(1).strip()
+       
+        text_output = text_output.strip('`').strip()
         
-        return {
-            "structured_condition": json.dumps(filters), # DB 로직에서 파싱할 JSON 필터 배열
-            "semantic_condition": semantic # KURE 임베딩에 사용할 핵심 키워드
-        }
+        try:
+            parsed = json.loads(text_output)
 
-    except Exception as e: # LangChain 래퍼는 일반 Exception으로 처리
-        print("Anthropic API 호출 에러:", e)
-        raise HTTPException(status_code=500, detail=f"Anthropic API 호출 에러: {e}")
-    
-if __name__ == "__main__":
-    # 이 파일을 직접 실행할 때만 아래 코드가 동작합니다.
-    # 테스트하고 싶은 쿼리를 여기에 입력하세요.
-    test_query = "최신 기술에 관심 많은 20대 남성"
-    print(f"테스트 쿼리: '{test_query}'")
-    print("-" * 50)
-    try:
-        # 함수를 직접 호출하여 결과를 확인합니다.
-        result = split_query_for_hybrid_search(test_query)
-        print("\n[질의 분리 성공]")
-        # 보기 좋게 출력
-        print("정형 조건 (structured_condition):")
-        print(json.dumps(json.loads(result["structured_condition"]), indent=2, ensure_ascii=False))
-        print("\n비정형 검색어 (semantic_condition):")
-        print(f"'{result['semantic_condition']}'")
+            # 추출한 limit 값을 최종 JSON에 추가
+            parsed['limit'] = limit_value
+            return parsed
+           
+        except json.JSONDecodeError as je:
+            print(f"❌ JSON 파싱 실패: {je}")
+            json_match = re.search(r'\{.*\}', text_output, re.DOTALL)
+            if json_match:
+                parsed_fallback = json.loads(json_match.group(0))
+                parsed_fallback['limit'] = limit_value
+                return parsed_fallback
+            raise HTTPException(status_code=500, detail=f"Claude 응답 파싱 실패: {je.msg}")
+           
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"\n[질의 분리 실패]: {e}")
-    
-    
+        print(f"❌ API 호출 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"API 오류: {str(e)}")
