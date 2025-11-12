@@ -17,8 +17,7 @@ from utils import (
     WELCOME_OBJECTIVE_FIELDS,
     EXCLUDED_RAW_FIELDS,
     get_panels_data_from_db,
-    get_all_panels_data_from_db,
-    get_db_distribution
+    get_all_panels_data_from_db
 )
 
 
@@ -102,65 +101,77 @@ def create_chart_data(
     max_categories: int = 10
 ) -> Dict:
     """
-    특정 키워드/필드에 대한 차트 데이터 생성 (버그 수정됨)
-    """
+    특정 키워드/필드에 대한 차트 데이터 생성
     
-    final_distribution = {}
-    description_prefix = ""
-
+    Args:
+        keyword: 키워드
+        field_name: 필드명
+        korean_name: 한글명
+        panels_data: 검색된 패널 데이터 (use_full_db=True면 사용 안 함)
+        use_full_db: True면 전체 DB 데이터로 분석
+        max_categories: 차트에 표시할 최대 카테고리 수 (기본 10개)
+    
+    Returns:
+        {
+            "topic": "차트 제목",
+            "description": "설명",
+            "ratio": "XX.X%",
+            "chart_data": [{"label": "...", "values": {...}}]
+        }
+    """
+    # 전체 DB 기반 분석 옵션
     if use_full_db:
-        print(f"DB에서 직접 '{field_name}' 집계")
-        final_distribution = get_db_distribution(field_name) 
-        
-        description_prefix = f"전체 데이터 기준 '{keyword}' 분석:"
-        
-        if not final_distribution:
+        print(f"      → 전체 DB 데이터로 '{field_name}' 분석")
+        full_data = get_all_panels_data_from_db()
+        if not full_data:
             return {
                 "topic": korean_name,
-                "description": f"'{keyword}' 관련 전체 데이터를 DB에서 집계할 수 없습니다.",
+                "description": f"'{keyword}' 관련 전체 데이터를 조회할 수 없습니다.",
                 "ratio": "0.0%",
                 "chart_data": []
             }
-
+        analysis_data = full_data
+        description_prefix = f"전체 데이터 기준 '{keyword}' 분석:"
     else:
         analysis_data = panels_data
         description_prefix = f"'{keyword}' 검색 결과:"
-        
-        # 필드값 추출
-        values = extract_field_values(analysis_data, field_name)
-        
-        if not values:
-            return {
-                "topic": korean_name,
-                "description": f"'{keyword}' 관련 데이터가 부족합니다.",
-                "ratio": "0.0%",
-                "chart_data": []
-            }
-        
-        # 분포 계산
-        distribution = calculate_distribution(values)
+    
+    # 필드 값 추출
+    values = extract_field_values(analysis_data, field_name)
+    
+    if not values:
+        return {
+            "topic": korean_name,
+            "description": f"'{keyword}' 관련 데이터가 부족합니다.",
+            "ratio": "0.0%",
+            "chart_data": []
+        }
+    
+    # 분포 계산
+    distribution = calculate_distribution(values)
 
-        # 0% 비율 항목 필터링
-        filtered_distribution = {k: v for k, v in distribution.items() if v > 0.0}
-        
-        if not filtered_distribution:
-            return {
-                "topic": korean_name,
-                "description": f"'{keyword}' 관련 데이터가 부족합니다.",
-                "ratio": "0.0%",
-                "chart_data": []
-            }
-     
-        if len(filtered_distribution) > max_categories:
-            sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
-            top_items = dict(sorted_items[:max_categories - 1])
-            other_sum = sum(v for k, v in sorted_items[max_categories - 1:])
-            if other_sum > 0:
-                top_items['기타'] = round(other_sum, 1)
-            final_distribution = top_items
-            print(f"      → {len(filtered_distribution)}개 카테고리 중 상위 {max_categories}개만 표시")
-        else:
-            final_distribution = filtered_distribution 
+    # ✅ 1단계: 0% 비율 항목 필터링
+    filtered_distribution = {k: v for k, v in distribution.items() if v > 0.0}
+    
+    if not filtered_distribution:
+        return {
+            "topic": korean_name,
+            "description": f"'{keyword}' 관련 데이터가 부족합니다.",
+            "ratio": "0.0%",
+            "chart_data": []
+        }
+    
+    # ✅ 2단계: 너무 많은 카테고리는 상위 N개만 + 기타로 묶기
+    if len(filtered_distribution) > max_categories:
+        sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
+        top_items = dict(sorted_items[:max_categories - 1])
+        other_sum = sum(v for k, v in sorted_items[max_categories - 1:])
+        if other_sum > 0:
+            top_items['기타'] = round(other_sum, 1)
+        final_distribution = top_items
+        print(f"      → {len(filtered_distribution)}개 카테고리 중 상위 {max_categories}개만 표시")
+    else:
+        final_distribution = filtered_distribution
     
     top_category, top_ratio = find_top_category(final_distribution)
     
@@ -174,6 +185,7 @@ def create_chart_data(
             "values": final_distribution
         }]
     }
+
 
 def analyze_search_results(
     query: str,
@@ -199,6 +211,7 @@ def analyze_search_results(
     Returns:
         (analysis_result, status_code)
     """
+    
     print(f"\n{'='*70}")
     print(f"📊 분석 시작")
     print(f"   질의: {query}")
@@ -215,7 +228,9 @@ def analyze_search_results(
         }, 200
     
     try:
+        # ============================================================
         # 1단계: DB에서 패널 데이터 조회
+        # ============================================================
         print("📌 1단계: 패널 데이터 조회")
         panels_data = get_panels_data_from_db(panel_id_list)
         
@@ -227,9 +242,11 @@ def analyze_search_results(
                 "charts": []
             }, 200
         
-        print(f"✅ {len(panels_data)}개 패널 데이터 조회 완료\n")
+        print(f"✅ {len(panels_data)}개 패널 데이터 조회 완료")
         
+        # ============================================================
         # 2단계: ranked_keywords 추출
+        # ============================================================
         print("📌 2단계: 키워드 우선순위 확인")
         ranked_keywords = classified_keywords.get('ranked_keywords', [])
         
@@ -268,10 +285,13 @@ def analyze_search_results(
         # ranked_keywords를 priority 순으로 정렬
         ranked_keywords.sort(key=lambda x: x.get('priority', 999))
         
-        print(f"✅ 키워드 목록: {[k.get('keyword') for k in ranked_keywords]}")
-        print(f"✅ 검색 조건 필드: {list(search_used_fields)} (4단계에서만 제외)\n")
         
+        print(f"✅ 키워드 목록: {[k.get('keyword') for k in ranked_keywords]}")
+        print(f"✅ 검색 조건 필드: {list(search_used_fields)} (4단계에서만 제외)")
+        
+        # ============================================================
         # 3단계: ranked_keywords 기반 차트 생성 (검색 조건 포함 OK!)
+        # ============================================================
         print("📌 3단계: 주요 키워드 차트 생성 (전체 DB 기준, 검색 조건 포함)")
         charts = []
         used_fields = []
@@ -306,7 +326,7 @@ def analyze_search_results(
                 print(f"   ⏭️  '{keyword}' (필드: {field}) - 이미 사용됨, 스킵")
                 continue
             
-            # ✅ 전체 DB 기반으로 차트 생성
+            # ✅ 검색 결과 기반으로 차트 생성 (use_full_db=False로 변경!)
             chart = create_chart_data(keyword, field, korean_name, panels_data, use_full_db=True)
             
             if not chart.get('chart_data') or chart.get('ratio') == '0.0%':
@@ -316,11 +336,11 @@ def analyze_search_results(
             charts.append(chart)
             used_fields.append(field)
             chart_count += 1
-            print(f"   ✅ [{chart_count}] '{keyword}' → {korean_name} 차트 생성 (전체 DB 기준)")
+            print(f"   ✅ [{chart_count}] '{keyword}' → {korean_name} 차트 생성 ({chart_time:.2f}초)")
         
-        print()
-        
+        # ============================================================
         # 4단계: 높은 비율 필드 찾기 (검색 조건 제외!)
+        # ============================================================
         print("📌 4단계: 높은 비율 필드 차트 생성 (검색 결과 기준, 검색 조건 제외)")
         needed_charts = 5 - len(charts)
         
@@ -329,12 +349,15 @@ def analyze_search_results(
         print(f"   🚫 제외할 필드: {exclude_fields_for_step4}")
         
         if needed_charts > 0:
+            high_ratio_start = time.time()
             high_ratio_fields = find_high_ratio_fields(
                 panels_data, 
                 exclude_fields=exclude_fields_for_step4,  # ✅ 검색 조건 + 이미 사용한 필드
                 threshold=50.0,
                 max_charts=needed_charts
             )
+            high_ratio_time = time.time() - high_ratio_start
+            print(f"   ⏱️  높은 비율 필드 탐색: {high_ratio_time:.2f}초")
             
             if not high_ratio_fields:
                 print(f"   ⚠️  50% 이상 비율을 가진 필드를 찾지 못했습니다.")
@@ -359,9 +382,9 @@ def analyze_search_results(
                 charts.append(chart)
                 print(f"   ✅ [{len(charts)}] {field_info['korean_name']} ({top_ratio:.1f}%) 차트 생성")
         
-        print()
-        
+        # ============================================================
         # 5단계: 요약 생성
+        # ============================================================
         print("📌 5단계: 요약 생성")
         main_summary = f"총 {len(panels_data)}명의 응답자 데이터를 분석했습니다. "
         
@@ -380,7 +403,20 @@ def analyze_search_results(
             "charts": charts
         }
         
+        # ============================================================
+        # ✅ 전체 시간 출력
+        # ============================================================
+        
         print(f"✅ 분석 완료: {len(charts)}개 차트 생성")
+        print(f"{'='*70}")
+        print(f"⏱️  [분석 단계별 소요 시간]")
+        print(f"   1단계 (패널 데이터 조회) : {step1_time:6.2f}초")
+        print(f"   2단계 (키워드 확인)      : {step2_time:6.2f}초")
+        print(f"   3단계 (주요 차트 생성)   : {step3_time:6.2f}초")
+        print(f"   4단계 (비율 차트 생성)   : {step4_time:6.2f}초")
+        print(f"   5단계 (요약 생성)        : {step5_time:6.2f}초")
+        print(f"   {'─'*40}")
+        print(f"   분석 전체 시간           : {analysis_total_time:6.2f}초")
         print(f"{'='*70}\n")
         
         return result, 200
