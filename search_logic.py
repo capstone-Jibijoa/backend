@@ -599,7 +599,7 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Op
         # 1순위: 교집합 결과
         # (개선) 교집합 대상자 중에서도 '가중치 점수'가 높은 순으로 정렬
         sorted_intersection_ids = sorted(
-            intersection_ids, 
+            intersection_ids,
             key=lambda pid: weighted_scores_map.get(pid, 0), 
             reverse=True
         )

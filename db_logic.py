@@ -39,11 +39,55 @@ def get_db_connection():
     except psycopg2.Error as e:
         print(f"❌ 데이터베이스 연결 실패: {e}")
         return None
+    
+# DB에 저장된 실제 소득 문자열 목록 (순서대로)
+INCOME_MAPPING = {
+    "월100만원 미만": 0,
+    "월100~199만원": 1000000,
+    "월200~299만원": 2000000,
+    "월300~399만원": 3000000,
+    "월400~499만원": 4000000,
+    "월500~599만원": 5000000,
+    "월600만원 이상": 6000000
+}
+
+def _build_income_sql_clause(key: str, operator: str, value: int) -> (str, tuple):
+    """
+    숫자형 소득 쿼리(예: GT 600만)를 DB의 범주형 문자열 쿼리(예: IN '월600만원 이상')로 변환합니다.
+    """
+    target_categories = []
+    
+    if operator == "GT" or operator == "GTE": # 이상/초과
+        target_categories = [cat for cat, min_val in INCOME_MAPPING.items() if min_val >= value]
+        
+    elif operator == "LT": # 미만 (<)
+        # value(예: 200만)보다 "작은" 최소값을 가진 모든 카테고리
+        target_categories = [cat for cat, min_val in INCOME_MAPPING.items() if min_val < value]
+    elif operator == "LTE": # 이하 (<=)
+        target_categories = [cat for cat, min_val in INCOME_MAPPING.items() if min_val <= value]
+
+    elif operator == "EQ": # 같음 (예: 350만원 -> 월300~399만원)
+        for cat, min_val in INCOME_MAPPING.items():
+            if value >= min_val:
+                target_categories = [cat] 
+            else:
+                break 
+
+    if not target_categories:
+        return " (1=0) ", () # 일치하는 카테고리 없음 (항상 False)
+
+    # SQL "IN" 절 생성
+    placeholders = ", ".join(["%s"] * len(target_categories))
+    
+    # ✅ [수정] 'ai_insights'가 아닌 'structured_data'를 참조합니다.
+    sql_clause = f" (structured_data ->> %s IN ({placeholders})) "
+    
+    params = (key,) + tuple(target_categories)
+    return sql_clause, params
 
 # =======================================================
 # 3. 검색 로그 기록 (권한 에러 처리 개선)
 # =======================================================
-
 def log_search_query(query: str, results_count: int, user_uid: int = None):
     """
     사용자의 검색 활동을 데이터베이스에 기록합니다.

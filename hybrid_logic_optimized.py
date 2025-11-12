@@ -1,11 +1,35 @@
+"""
+LLM 응답 캐싱을 적용한 hybrid_logic.py 최적화 버전
+- Redis 캐시로 동일 쿼리 반복 시 LLM 호출 생략
+- 예상 개선: 0.5~2초 → 0.01초 (캐시 히트 시)
+"""
 import os
 import json
 import re
+import hashlib
 from dotenv import load_dotenv
 from datetime import datetime
 from fastapi import HTTPException
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
+
+# Redis 캐싱 추가
+try:
+    import redis
+    REDIS_CLIENT = redis.Redis(
+        host=os.getenv("REDIS_HOST", "localhost"),
+        port=int(os.getenv("REDIS_PORT", 6379)),
+        decode_responses=True,
+        socket_connect_timeout=1
+    )
+    # 연결 테스트
+    REDIS_CLIENT.ping()
+    print("✅ Redis 캐시 연결 성공")
+    REDIS_AVAILABLE = True
+except Exception as e:
+    print(f"⚠️  Redis 연결 실패 (캐싱 비활성화): {e}")
+    REDIS_CLIENT = None
+    REDIS_AVAILABLE = False
 
 load_dotenv()
 
@@ -16,12 +40,87 @@ except Exception as e:
     CLAUDE_CLIENT = None
     print(f"Anthropic 클라이언트 생성 실패: {e}")
 
+# 캐시 TTL (초)
+CACHE_TTL = 86400  # 24시간
+
+
+def get_cache_key(query: str) -> str:
+    """쿼리에 대한 캐시 키 생성"""
+    # 쿼리를 정규화 (공백, 대소문자 등)
+    normalized = query.strip().lower()
+    # MD5 해시 생성
+    hash_value = hashlib.md5(normalized.encode()).hexdigest()
+    return f"llm_classify:{hash_value}"
+
+
+def get_cached_classification(query: str) -> dict:
+    """Redis에서 캐시된 분류 결과 조회"""
+    if not REDIS_AVAILABLE:
+        return None
+    
+    try:
+        cache_key = get_cache_key(query)
+        cached = REDIS_CLIENT.get(cache_key)
+        
+        if cached:
+            print(f"✅ LLM 캐시 히트! (키: {cache_key[:20]}...)")
+            return json.loads(cached)
+        
+        return None
+    except Exception as e:
+        print(f"⚠️  캐시 조회 실패: {e}")
+        return None
+
+
+def set_cached_classification(query: str, result: dict):
+    """Redis에 분류 결과 캐싱"""
+    if not REDIS_AVAILABLE:
+        return
+    
+    try:
+        cache_key = get_cache_key(query)
+        REDIS_CLIENT.setex(
+            cache_key,
+            CACHE_TTL,
+            json.dumps(result, ensure_ascii=False)
+        )
+        print(f"💾 LLM 결과 캐싱 완료 (TTL: {CACHE_TTL}초)")
+    except Exception as e:
+        print(f"⚠️  캐싱 실패: {e}")
+
+
 def classify_query_keywords(query: str) -> dict:
-   
+    """
+    쿼리를 키워드로 분류 (캐싱 적용)
+    
+    개선점:
+    1. 동일 쿼리는 Redis 캐시에서 즉시 반환
+    2. LLM 호출 비용 절감
+    3. 응답 속도 대폭 향상 (2초 → 0.01초)
+    """
+    # 1. 캐시 확인
+    cached_result = get_cached_classification(query)
+    if cached_result:
+        return cached_result
+    
+    # 2. LLM 호출 (캐시 미스)
+    print(f"🔄 LLM 호출 중... (캐시 미스)")
+    result = _classify_query_keywords_uncached(query)
+    
+    # 3. 결과 캐싱
+    set_cached_classification(query, result)
+    
+    return result
+
+
+def _classify_query_keywords_uncached(query: str) -> dict:
+    """
+    실제 LLM 호출 함수 (캐싱 미적용)
+    """
     if CLAUDE_CLIENT is None:
         raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    system_prompt = system_prompt ="""
+    system_prompt = """
 사용자 쿼리를 분석하고 데이터베이스 검색 키워드로 분류하는 전문가입니다.
 
 ## 분류 기준
@@ -42,12 +141,16 @@ def classify_query_keywords(query: str) -> dict:
 **ranked_keywords (우선순위 키워드)** ✅ 신규 추가
 - 주요 검색 조건 3개를 우선순위순으로 나열
 - 각 키워드에 대응하는 DB 필드명 포함
+- 각 키워드에 대응되는 DB 필드명은 중복되면 안 됨. 따라서, 중복되는 키워드 하나만 남기고, 다른 키워드들은 새로 입력
 - 프론트엔드 테이블 컬럼 표시 순서 결정용
 
 ## 필드 매핑 규칙 ✅ 신규 추가
 - 서울/경기/부산 등 → region_major (거주 지역)
 - 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
 - 20대/30대/40대 등 → birth_year (연령대)
+- 젊은층/청년/MZ → 20대, 30대
+- 중장년층 → 40대, 50대
+- 노년층/시니어 → 60대, 70대
 - 남자/여자/남성/여성 → gender (성별)
 - 직장인/학생 등 → job_title_raw (직업)
 - 고소득/저소득 → income_personal_monthly (소득)
@@ -103,50 +206,11 @@ def classify_query_keywords(query: str) -> dict:
 }
 ```
 
-쿼리: "부산 40대 삼성폰 쓰는 고소득자 50명"
-```json
-{
-  "welcome_keywords": {
-    "objective": ["부산", "40대", "고소득자"],
-    "subjective": ["삼성폰"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "전자기기",
-    "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
-  },
-  "ranked_keywords": [
-    {"keyword": "부산", "field": "region_major", "description": "거주 지역", "priority": 1},
-    {"keyword": "40대", "field": "birth_year", "description": "연령대", "priority": 2},
-    {"keyword": "고소득", "field": "income_personal_monthly", "description": "소득", "priority": 3}
-  ]
-}
-```
-
-쿼리: "서울 OTT 사용하는 40~50대 남성" ✅ 연령대 통합 예시
-```json
-{
-  "welcome_keywords": {
-    "objective": ["서울", "40~50대", "남성"],
-    "subjective": ["OTT"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "엔터테인먼트",
-    "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
-  },
-  "ranked_keywords": [
-    {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
-    {"keyword": "40~50대", "field": "birth_year", "description": "연령대", "priority": 2},
-    {"keyword": "남성", "field": "gender", "description": "성별", "priority": 3}
-  ]
-}
-```
-
 사용자 쿼리:
 <query>
 {{QUERY}}
 </query>
 """
-
 
     # 인원 수(limit) 추출 로직 
     limit_match = re.search(r'(\d+)\s*명', query)
@@ -181,8 +245,6 @@ def classify_query_keywords(query: str) -> dict:
         
         try:
             parsed = json.loads(text_output)
-
-            # 추출한 limit 값을 최종 JSON에 추가
             parsed['limit'] = limit_value
             return parsed
            
@@ -202,3 +264,66 @@ def classify_query_keywords(query: str) -> dict:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"API 오류: {str(e)}")
+
+
+def clear_cache(query: str = None):
+    """
+    캐시 삭제 함수
+    
+    Args:
+        query: 특정 쿼리의 캐시만 삭제 (None이면 전체 삭제)
+    """
+    if not REDIS_AVAILABLE:
+        print("⚠️  Redis 사용 불가")
+        return
+    
+    try:
+        if query:
+            # 특정 쿼리 캐시 삭제
+            cache_key = get_cache_key(query)
+            result = REDIS_CLIENT.delete(cache_key)
+            if result:
+                print(f"✅ 캐시 삭제 완료: {query}")
+            else:
+                print(f"⚠️  캐시 없음: {query}")
+        else:
+            # 전체 LLM 캐시 삭제
+            pattern = "llm_classify:*"
+            keys = REDIS_CLIENT.keys(pattern)
+            if keys:
+                REDIS_CLIENT.delete(*keys)
+                print(f"✅ 전체 캐시 삭제 완료: {len(keys)}개")
+            else:
+                print("⚠️  삭제할 캐시 없음")
+    except Exception as e:
+        print(f"❌ 캐시 삭제 실패: {e}")
+
+
+# 캐시 통계 조회
+def get_cache_stats():
+    """캐시 통계 반환"""
+    if not REDIS_AVAILABLE:
+        return {"status": "disabled"}
+    
+    try:
+        pattern = "llm_classify:*"
+        keys = REDIS_CLIENT.keys(pattern)
+        
+        total_size = 0
+        for key in keys[:100]:  # 샘플링
+            try:
+                size = len(REDIS_CLIENT.get(key) or "")
+                total_size += size
+            except:
+                pass
+        
+        avg_size = total_size / min(len(keys), 100) if keys else 0
+        
+        return {
+            "status": "enabled",
+            "total_keys": len(keys),
+            "estimated_total_size_mb": (avg_size * len(keys)) / (1024 * 1024),
+            "avg_entry_size_kb": avg_size / 1024
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
