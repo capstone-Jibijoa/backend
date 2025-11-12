@@ -141,16 +141,12 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 **ranked_keywords (우선순위 키워드)** ✅ 신규 추가
 - 주요 검색 조건 3개를 우선순위순으로 나열
 - 각 키워드에 대응하는 DB 필드명 포함
-- 각 키워드에 대응되는 DB 필드명은 중복되면 안 됨. 따라서, 중복되는 키워드 하나만 남기고, 다른 키워드들은 새로 입력
 - 프론트엔드 테이블 컬럼 표시 순서 결정용
 
-## 필드 매핑 규칙 ✅ 신규 추가
+## 필드 매핑 규칙
 - 서울/경기/부산 등 → region_major (거주 지역)
 - 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
 - 20대/30대/40대 등 → birth_year (연령대)
-- 젊은층/청년/MZ → 20대, 30대
-- 중장년층 → 40대, 50대
-- 노년층/시니어 → 60대, 70대
 - 남자/여자/남성/여성 → gender (성별)
 - 직장인/학생 등 → job_title_raw (직업)
 - 고소득/저소득 → income_personal_monthly (소득)
@@ -158,7 +154,15 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 - 흡연/비흡연 → smoking_experience (흡연 경험)
 - 음주/금주 → drinking_experience (음주 경험)
 - 차량보유/차없음 → car_ownership (차량 보유)
+- 직장인/학생/주부 등 구체적인 직업 분류 → job_title_raw
 - IT/마케팅 등 구체적 직무 → job_duty_raw (직무)
+- 삼성/갤럭시/아이폰/애플 등 휴대전화 브랜드 → phone_brand_raw
+- 아이폰 15/갤럭시 S23 등 휴대전화 모델 → phone_model_raw
+- 현대차/기아/BMW/테슬라 등 차량 제조사 → car_manufacturer_raw
+- 소나타/K5/Model Y 등 차량 모델명 → car_model_raw
+- 말보로/에쎄/담배/전자담배 등 흡연 브랜드/종류 → smoking_brand_etc_raw
+- 기타 담배 종류/흡연 세부 사항 → smoking_brand_other_details_raw
+- 주류 종류/음주 세부 사항 → drinking_experience_other_details_raw
 - 기타 브랜드/제품명 → 해당 필드 또는 null
 
 ## 판단 로직
@@ -169,30 +173,22 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 ## 출력 (순수 JSON만)
 ```json
 {
-  "welcome_keywords": {
-    "objective": ["카테고리1", "카테고리2"],
-    "subjective": ["특징1", "특징2"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "주제 또는 null",
-    "keywords": ["키워드1", "키워드2"]
-  },
-  "ranked_keywords": [
-    {"keyword": "키워드1", "field": "필드명", "description": "한글 설명", "priority": 1},
-    {"keyword": "키워드2", "field": "필드명", "description": "한글 설명", "priority": 2},
-    {"keyword": "키워드3", "field": "필드명", "description": "한글 설명", "priority": 3}
-  ]
+  "welcome_keywords": { ... },
+  "qpoll_keywords": { ... },
+  "ranked_keywords": [ ... ],
+  "query_propensity": "objective_heavy | subjective_heavy | balanced"
 }
+
 ```
 
 ## 예시
 
-쿼리: "서울 30대 IT 직장인 100명"
+쿼리: "IT 기술에 관심 많고 재테크도 잘하는 서울 30대 IT 직장인 100명"
 ```json
 {
   "welcome_keywords": {
     "objective": ["서울", "30대", "직장인"],
-    "subjective": ["IT"]
+    "subjective": [["IT", "기술"], ["재테크", "자산관리"]]
   },
   "qpoll_keywords": {
     "survey_type": null,

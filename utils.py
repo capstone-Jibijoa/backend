@@ -209,15 +209,7 @@ FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
 
 # ✅ 분석에서 제외할 raw 필드 (데이터가 너무 다양하거나 품질이 낮음)
 EXCLUDED_RAW_FIELDS = {
-    'job_title_raw',
-    'job_duty_raw',
-    'phone_brand_raw',
-    'phone_model_raw',
-    'car_manufacturer_raw',
-    'car_model_raw',
-    'smoking_brand_etc_raw',
-    'smoking_brand_other_details_raw',
-    'drinking_experience_other_details_raw'
+    
 }
 
 def get_all_panels_data_from_db(limit: int = None) -> List[Dict]:

@@ -6,15 +6,19 @@ from typing import Optional, Tuple, Dict, List
 from fastapi.middleware.cors import CORSMiddleware
 
 # [최적화] import
-from hybrid_logic import classify_query_keywords # 1. LLM 캐싱 제외
+from hybrid_logic_optimized import classify_query_keywords # 1. LLM 캐싱 적용
+from search_logic import initialize_embeddings # 4. 모델 미리 로딩
 from search_logic_optimized import hybrid_search_parallel as hybrid_search # 5. 검색 병렬화
 from analysis_logic_optimized import analyze_search_results_optimized as analyze_search_results # 2. DB 집계 분석
 from db_logic_optimized import ( # 3. Connection Pool
     log_search_query,
     get_db_connection_context,
     init_db,
-    cleanup_db
+    cleanup_db,
+    get_qdrant_client
 )
+from qdrant_client.models import Filter, FieldCondition, MatchValue
+
 
 # FastAPI 애플리케이션 초기화
 app = FastAPI(title="Multi-Table Hybrid Search API v3 (Optimized & Refactored)")
@@ -32,11 +36,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3단계: Connection Pool 이벤트
+# 4단계: 모델 미리 로딩 함수
+def preload_models():
+    """애플리케이션 시작 시 모든 AI 모델을 미리 로드합니다."""
+    print("\n" + "="*70)
+    print("🔄 모든 AI 모델을 미리 로드합니다...")
+    # 1. KURE 임베딩 모델 로드
+    initialize_embeddings()
+    # 2. Claude LLM 모델 로드 (테스트 호출로 초기화 유도)
+    classify_query_keywords("모델 로딩 테스트")
+    print("✅ 모든 AI 모델 로드 완료")
+    print("="*70 + "\n")
+
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 FastAPI 시작... Connection Pool 초기화")
+    print("🚀 FastAPI 시작...")
     init_db()
+    preload_models()
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -292,62 +308,56 @@ async def search_and_analyze(request: AnalysisRequest):
             response['analysis_summary'] = '차트 생성 실패'
             print(f"⚠️  차트 생성 실패")
         
-        # ============================================================
-        print("📌 6단계: (N+1 FIX) 패널 상세 데이터 일괄 조회")
+        # ===============================================================
+        # 💥 [신규 로직] Table Data 생성을 위해 DB 조회
+        # ===============================================================
+        print(f"\n📌 6단계: Table Data 생성 (패널 {len(panel_id_list)}개 대상)")
         table_data = []
-        if panel_id_list: # _perform_common_search에서 받은 리스트
+        
+        # 프론트엔드가 페이지네이션으로 100개만 보여주므로,
+        # DB 부하 및 네트워크 효율성을 위해 상위 100개만 조회합니다.
+        # panel_id_list는 검색 결과의 모든 ID (최대 5000개)를 포함할 수 있습니다.
+        # response['final_panel_ids']는 이미 100개로 잘려있으므로 그것을 사용합니다.
+        ids_to_fetch = response['final_panel_ids']
+        
+        if ids_to_fetch:
             try:
-                # ❗️새로운 Connection Pool 방식 사용
                 with get_db_connection_context() as conn:
-                    if conn:
-                        cur = conn.cursor()
+                    with conn.cursor() as cur:
+                        # SQL IN 절을 사용
+                        sql_query = """
+                            SELECT panel_id, structured_data 
+                            FROM welcome_meta2 
+                            WHERE panel_id IN %s
+                        """
+                        # IN 절에 튜플 형태로 ID 리스트 전달
+                        cur.execute(sql_query, (tuple(ids_to_fetch),))
                         
-                        # panel_id_list가 비어있지 않은지 한 번 더 확인
-                        if len(panel_id_list) == 0:
-                            results = []
-                        elif len(panel_id_list) == 1:
-                            # 1개일 경우 = 사용
-                            cur.execute("""
-                                SELECT panel_id, structured_data
-                                FROM welcome_meta2 
-                                WHERE panel_id = %s
-                            """, (panel_id_list[0],))
-                            results = cur.fetchall()
-                        else:
-                            # 2개 이상일 경우 IN %s 사용 (리스트를 튜플로 변환)
-                            cur.execute("""
-                                SELECT panel_id, structured_data
-                                FROM welcome_meta2 
-                                WHERE panel_id IN %s
-                            """, (tuple(panel_id_list),))
-                            results = cur.fetchall()
+                        results = cur.fetchall()
                         
-                        cur.close()
-                        print(f"✅ DB에서 {len(results)}개의 상세 데이터 조회됨")
-
-                        # 랭킹 순서를 보장하기 위해 map으로 변환
-                        panel_map = {}
-                        for row in results:
-                            panel_id_value, structured_data = row
-                            panel_data = {"panel_id": panel_id_value}
-                            if isinstance(structured_data, dict):
-                                panel_data.update(structured_data)
-                            panel_map[panel_id_value] = panel_data
+                        # DB에서 가져온 결과는 순서가 보장되지 않으므로,
+                        # 맵을 만들어 검색 순서(ids_to_fetch)대로 재정렬합니다.
+                        fetched_data_map = {row[0]: row[1] for row in results}
                         
-                        # 원본 panel_id_list 순서대로 table_data 재정렬
-                        table_data = [panel_map.get(pid) for pid in panel_id_list if panel_map.get(pid)]
-                        print(f"✅ {len(table_data)}개 패널 상세 데이터 반환 준비 완료")
-
-                    else:
-                        print("⚠️ DB 연결 실패 (Pool), 상세 데이터를 조회할 수 없습니다.")
-            except Exception as e:
-                print(f"❌ (N+1 FIX) 패널 상세 데이터 일괄 조회 실패: {e}")
-                import traceback
-                traceback.print_exc()
-
-        # ✅ tableData를 최종 response에 추가 (ResultsPage.jsx가 사용할 키)
+                        # ids_to_fetch (검색 점수 순서)를 기준으로 table_data 리스트 생성
+                        for pid in ids_to_fetch:
+                            if pid in fetched_data_map:
+                                data = fetched_data_map[pid]
+                                if isinstance(data, dict):
+                                    data['panel_id'] = pid # panel_id를 데이터에 포함
+                                    table_data.append(data)
+                                else:
+                                    # structured_data가 dict가 아닌 경우 (예: null)
+                                    table_data.append({"panel_id": pid})
+                                    
+            except Exception as db_e:
+                print(f"❌ Table Data 조회 실패: {db_e}")
+                # 실패해도 차트 결과는 반환하도록 table_data는 비워둠
+        
+        # 💥 최종 응답에 tableData 추가
         response['tableData'] = table_data
-
+        
+        print(f"✅ 차트 {len(response['charts'])}개, 테이블 데이터 {len(table_data)}개 생성 완료")
         print(f"\n✅ 검색+분석 완료")
         
         return response
@@ -385,9 +395,14 @@ async def debug_classify(search_query: SearchQuery):
 @app.get("/api/panels/{panel_id}")
 async def get_panel_details(panel_id: str):
     """
-    특정 panel_id의 패널 상세 정보를 조회합니다. (Connection Pool 적용)
+    특정 panel_id의 패널 상세 정보를 조회합니다.
+    - Welcome 데이터 (PostgreSQL)
+    - QPoll 질문/응답 데이터 (Qdrant) - 평탄화하여 반환
     """
     try:
+        # ============================================================
+        # 1. PostgreSQL에서 Welcome 데이터 조회
+        # ============================================================
         with get_db_connection_context() as conn:
             if not conn:
                 raise HTTPException(status_code=500, detail="데이터베이스 연결 실패")
@@ -404,19 +419,71 @@ async def get_panel_details(panel_id: str):
             
             if not result:
                 cur.close()
-                raise HTTPException(status_code=404, detail=f"panel_id {panel_id}를 찾을 수 없습니다.")
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"panel_id {panel_id}를 찾을 수 없습니다."
+                )
             
             panel_id_value, structured_data = result
+            
+            # Welcome 데이터 구성
             panel_data = {"panel_id": panel_id_value}
             if isinstance(structured_data, dict):
                 panel_data.update(structured_data)
             
             cur.close()
-            return panel_data
+        
+        # ============================================================
+        # 2. Qdrant에서 QPoll 데이터 조회 및 평탄화
+        # ============================================================
+        try:
+            qdrant_client = get_qdrant_client()
             
+            if qdrant_client:
+                # Qdrant에서 panel_id로 필터링하여 검색
+                qpoll_results = qdrant_client.scroll(
+                    collection_name="qpoll_vectors_v2",
+                    scroll_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="panel_id",
+                                match=MatchValue(value=panel_id)
+                            )
+                        ]
+                    ),
+                    limit=100,  # 최대 100개 질문/응답
+                    with_payload=True,
+                    with_vectors=False  # 벡터는 불필요
+                )
+                
+                # ✅ QPoll 데이터를 평탄화하여 panel_data에 추가
+                if qpoll_results and qpoll_results[0]:  # (points, next_page_offset)
+                    points = qpoll_results[0]
+                    
+                    for idx, point in enumerate(points, 1):
+                        if point.payload:
+                            question = point.payload.get("question", "")
+                            sentence = point.payload.get("sentence", "")
+                            
+                            # ✅ "qpoll_1_question", "qpoll_1_answer" 형식으로 저장
+                            panel_data[f"qpoll_{idx}_질문"] = question
+                            panel_data[f"qpoll_{idx}_응답"] = sentence
+                    
+                    # QPoll 개수 저장 (선택사항)
+                    panel_data["qpoll_응답_개수"] = len(points)
+            
+        except Exception as qpoll_error:
+            # QPoll 조회 실패 시에도 Welcome 데이터는 반환
+            print(f"⚠️  QPoll 조회 실패 (panel_id: {panel_id}): {qpoll_error}")
+            panel_data["qpoll_조회_오류"] = str(qpoll_error)
+        
+        return panel_data
+        
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"조회 실패: {str(e)}")
 
 # ====================================================================
