@@ -9,7 +9,8 @@ def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 
     """키워드 리스트를 SQL WHERE 조건으로 변환"""
     conditions = []
     params = []
-    regions = []
+    regions_major = []
+    regions_minor = []
     
     for keyword in keywords:
         kw = keyword.strip().lower()
@@ -28,7 +29,9 @@ def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 
             params.append('F')
         elif keyword in ['서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종',
                         '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주']:
-            regions.append(keyword)
+            regions_major.append(keyword)
+        elif keyword.endswith(('시', '구', '군')):
+            regions_minor.append(keyword)
         
         elif '대' in keyword and keyword[:-1].isdigit():
             age_prefix = int(keyword[:-1])
@@ -40,13 +43,21 @@ def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 
             )
             params.extend([birth_start, birth_end])
     
-    if len(regions) == 1:
+    if len(regions_major) == 1:
+        conditions.append("(structured_data->>'region_major' = %s)")
+        params.append(regions_major[0])
+    elif len(regions_major) > 1:
+        placeholders = ','.join(['%s'] * len(regions_major))
+        conditions.append(f"(structured_data->>'region_major' IN ({placeholders}))")
+        params.extend(regions_major)
+    
+    if len(regions_minor) == 1:
         conditions.append("(structured_data->>'region_minor' = %s)")
-        params.append(regions[0])
-    elif len(regions) > 1:
-        placeholders = ','.join(['%s'] * len(regions))
+        params.append(regions_minor[0])
+    elif len(regions_minor) > 1:
+        placeholders = ','.join(['%s'] * len(regions_minor))
         conditions.append(f"(structured_data->>'region_minor' IN ({placeholders}))")
-        params.extend(regions)
+        params.extend(regions_minor)
     
     if not conditions:
         return "", []
@@ -90,7 +101,9 @@ def extract_field_values(data: List[Dict], field_name: str) -> List[Any]:
     
     if field_name == "birth_year":
         values = [get_age_group(item.get(field_name, 0)) for item in data if item.get(field_name)]
-    elif field_name == "region":
+    elif field_name == "region_major":
+        values = [item.get("region_major") for item in data if item.get("region_major")]
+    elif field_name == "region_minor":
         values = [item.get("region_minor") for item in data if item.get("region_minor")]
     else:
         values = [item.get(field_name) for item in data if item.get(field_name)]
@@ -100,7 +113,8 @@ def extract_field_values(data: List[Dict], field_name: str) -> List[Any]:
 WELCOME_OBJECTIVE_FIELDS = [
     ("gender", "성별"),
     ("birth_year", "연령대"),
-    ("region_minor", "거주 지역"),
+    ("region_major", "거주 지역"),
+    ("region_minor", "세부 거주 지역"),
     ("marital_status", "결혼 여부"),
     ("job_title_raw", "직업"),
     ("income_personal_monthly", "개인 소득"),

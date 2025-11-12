@@ -46,7 +46,7 @@ def classify_query_keywords(query: str) -> dict:
 
 ## 필드 매핑 규칙 ✅ 신규 추가
 - 서울/경기/부산 등 → region_major (거주 지역)
-- 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 region_major보다 작은 범위의 거주 지역)
+- 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
 - 20대/30대/40대 등 → birth_year (연령대)
 - 남자/여자/남성/여성 → gender (성별)
 - 직장인/학생 등 → job_title_raw (직업)

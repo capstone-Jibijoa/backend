@@ -421,6 +421,8 @@ def _guess_field_from_keyword(keyword: str) -> str:
         return 'birth_year'
     elif keyword in ['서울', '경기', '부산', '대구', '인천', '광주', '대전', '울산', '세종', 
                      '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주']:
+        return 'region_major'
+    elif keyword.endswith(('시', '구', '군')):
         return 'region_minor'
     elif kw in ['미혼', '싱글', '기혼', '결혼', '이혼', '돌싱']:
         return 'marital_status'
