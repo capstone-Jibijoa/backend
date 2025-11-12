@@ -147,6 +147,9 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 - 서울/경기/부산 등 → region_major (거주 지역)
 - 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
 - 20대/30대/40대 등 → birth_year (연령대)
+- 젊은층/청년/MZ → 20대, 30대
+- 중장년층 → 40대, 50대
+- 노년층/시니어 → 60대, 70대
 - 남자/여자/남성/여성 → gender (성별)
 - 직장인/학생 등 → job_title_raw (직업)
 - 고소득/저소득 → income_personal_monthly (소득)
@@ -165,30 +168,22 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 ## 출력 (순수 JSON만)
 ```json
 {
-  "welcome_keywords": {
-    "objective": ["카테고리1", "카테고리2"],
-    "subjective": ["특징1", "특징2"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "주제 또는 null",
-    "keywords": ["키워드1", "키워드2"]
-  },
-  "ranked_keywords": [
-    {"keyword": "키워드1", "field": "필드명", "description": "한글 설명", "priority": 1},
-    {"keyword": "키워드2", "field": "필드명", "description": "한글 설명", "priority": 2},
-    {"keyword": "키워드3", "field": "필드명", "description": "한글 설명", "priority": 3}
-  ]
+  "welcome_keywords": { ... },
+  "qpoll_keywords": { ... },
+  "ranked_keywords": [ ... ],
+  "query_propensity": "objective_heavy | subjective_heavy | balanced"
 }
+
 ```
 
 ## 예시
 
-쿼리: "서울 30대 IT 직장인 100명"
+쿼리: "IT 기술에 관심 많고 재테크도 잘하는 서울 30대 IT 직장인 100명"
 ```json
 {
   "welcome_keywords": {
     "objective": ["서울", "30대", "직장인"],
-    "subjective": ["IT"]
+    "subjective": [["IT", "기술"], ["재테크", "자산관리"]]
   },
   "qpoll_keywords": {
     "survey_type": null,

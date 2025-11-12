@@ -6,7 +6,8 @@ from typing import Optional, Tuple, Dict, List
 from fastapi.middleware.cors import CORSMiddleware
 
 # [최적화] import
-from hybrid_logic import classify_query_keywords # 1. LLM 캐싱 제외
+from hybrid_logic_optimized import classify_query_keywords # 1. LLM 캐싱 적용
+from search_logic import initialize_embeddings # 4. 모델 미리 로딩
 from search_logic_optimized import hybrid_search_parallel as hybrid_search # 5. 검색 병렬화
 from analysis_logic_optimized import analyze_search_results_optimized as analyze_search_results # 2. DB 집계 분석
 from db_logic_optimized import ( # 3. Connection Pool
@@ -32,11 +33,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3단계: Connection Pool 이벤트
+# 4단계: 모델 미리 로딩 함수
+def preload_models():
+    """애플리케이션 시작 시 모든 AI 모델을 미리 로드합니다."""
+    print("\n" + "="*70)
+    print("🔄 모든 AI 모델을 미리 로드합니다...")
+    # 1. KURE 임베딩 모델 로드
+    initialize_embeddings()
+    # 2. Claude LLM 모델 로드 (테스트 호출로 초기화 유도)
+    classify_query_keywords("모델 로딩 테스트")
+    print("✅ 모든 AI 모델 로드 완료")
+    print("="*70 + "\n")
+
 @app.on_event("startup")
 async def startup_event():
-    print("🚀 FastAPI 시작... Connection Pool 초기화")
+    print("🚀 FastAPI 시작...")
     init_db()
+    preload_models()
 
 @app.on_event("shutdown")
 async def shutdown_event():
