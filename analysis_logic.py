@@ -109,10 +109,6 @@ def create_chart_data(
     description_prefix = ""
 
     if use_full_db:
-        # ============================================
-        # 1. [DB 집계 경로] (use_full_db = True)
-        #    - DB에서 'final_distribution'을 직접 받아옵니다.
-        # ============================================
         print(f"DB에서 직접 '{field_name}' 집계")
         final_distribution = get_db_distribution(field_name) 
         
@@ -125,14 +121,10 @@ def create_chart_data(
                 "ratio": "0.0%",
                 "chart_data": []
             }
-        # (DB 집계 경로는 여기서 끝입니다. 'final_distribution'이 설정되었습니다.)
 
     else:
-
         analysis_data = panels_data
         description_prefix = f"'{keyword}' 검색 결과:"
-        
-        # --- 'values'를 사용하는 모든 로직이 이 'else' 블록 안에 있어야 합니다 ---
         
         # 필드값 추출
         values = extract_field_values(analysis_data, field_name)
@@ -158,8 +150,7 @@ def create_chart_data(
                 "ratio": "0.0%",
                 "chart_data": []
             }
-        
-        # 너무 많은 카테고리는 상위 N개만 + 기타로 묶기
+     
         if len(filtered_distribution) > max_categories:
             sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
             top_items = dict(sorted_items[:max_categories - 1])
@@ -169,10 +160,8 @@ def create_chart_data(
             final_distribution = top_items
             print(f"      → {len(filtered_distribution)}개 카테고리 중 상위 {max_categories}개만 표시")
         else:
-            final_distribution = filtered_distribution
-        
-
-
+            final_distribution = filtered_distribution 
+    
     top_category, top_ratio = find_top_category(final_distribution)
     
     # 차트 데이터 생성
@@ -185,7 +174,6 @@ def create_chart_data(
             "values": final_distribution
         }]
     }
-
 
 def analyze_search_results(
     query: str,
