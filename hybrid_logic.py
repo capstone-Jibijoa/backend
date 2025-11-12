@@ -45,7 +45,8 @@ def classify_query_keywords(query: str) -> dict:
 - 프론트엔드 테이블 컬럼 표시 순서 결정용
 
 ## 필드 매핑 규칙 ✅ 신규 추가
-- 서울/경기/부산 등 → region_minor (거주 지역)
+- 서울/경기/부산 등 → region_major (거주 지역)
+- 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 region_major보다 작은 범위의 거주 지역)
 - 20대/30대/40대 등 → birth_year (연령대)
 - 남자/여자/남성/여성 → gender (성별)
 - 직장인/학생 등 → job_title_raw (직업)
@@ -95,7 +96,7 @@ def classify_query_keywords(query: str) -> dict:
     "keywords": []
   },
   "ranked_keywords": [
-    {"keyword": "서울", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
     {"keyword": "30대", "field": "birth_year", "description": "연령대", "priority": 2},
     {"keyword": "IT", "field": "job_duty_raw", "description": "직무", "priority": 3}
   ]
@@ -114,7 +115,7 @@ def classify_query_keywords(query: str) -> dict:
     "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
   },
   "ranked_keywords": [
-    {"keyword": "부산", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "부산", "field": "region_major", "description": "거주 지역", "priority": 1},
     {"keyword": "40대", "field": "birth_year", "description": "연령대", "priority": 2},
     {"keyword": "고소득", "field": "income_personal_monthly", "description": "소득", "priority": 3}
   ]
@@ -133,7 +134,7 @@ def classify_query_keywords(query: str) -> dict:
     "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
   },
   "ranked_keywords": [
-    {"keyword": "서울", "field": "region_minor", "description": "거주 지역", "priority": 1},
+    {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
     {"keyword": "40~50대", "field": "birth_year", "description": "연령대", "priority": 2},
     {"keyword": "남성", "field": "gender", "description": "성별", "priority": 3}
   ]
