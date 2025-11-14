@@ -13,7 +13,6 @@ from utils import (
     find_top_category,
     FIELD_NAME_MAP,
     WELCOME_OBJECTIVE_FIELDS,
-    EXCLUDED_RAW_FIELDS,
     get_panels_data_from_db
 )
 
@@ -251,11 +250,11 @@ def find_high_ratio_fields_optimized(
     """
     candidate_fields = []
     
-    for field_name, korean_name in WELCOME_OBJECTIVE_FIELDS:
-        # 제외 조건
-        if field_name in EXCLUDED_RAW_FIELDS or field_name in exclude_fields:
-            continue
-        candidate_fields.append((field_name, korean_name))
+    # for field_name, korean_name in WELCOME_OBJECTIVE_FIELDS:
+    #     # 제외 조건
+    #     if field_name in EXCLUDED_RAW_FIELDS or field_name in exclude_fields:
+    #         continue
+    #     candidate_fields.append((field_name, korean_name))
     
     if not candidate_fields:
         return []
@@ -416,10 +415,6 @@ def analyze_search_results_optimized(
             korean_name = kw_info.get('description', FIELD_NAME_MAP.get(field, field))
             
             if not field or not keyword:
-                continue
-            
-            if field in EXCLUDED_RAW_FIELDS:
-                print(f"   ⏭️  '{keyword}' (필드: {field}) - raw 필드, 스킵")
                 continue
             
             if field not in objective_fields:

@@ -397,7 +397,7 @@ async def get_panel_details(panel_id: str):
     """
     특정 panel_id의 패널 상세 정보를 조회합니다.
     - Welcome 데이터 (PostgreSQL)
-    - QPoll 질문/응답 데이터 (Qdrant) - 평탄화하여 반환
+    - QPoll 질문/응답 데이터 (Qdrant) - 평탄화하여 통합
     """
     try:
         # ============================================================
@@ -440,6 +440,8 @@ async def get_panel_details(panel_id: str):
             qdrant_client = get_qdrant_client()
             
             if qdrant_client:
+                print(f"🔍 QPoll 데이터 조회 시작 (panel_id: {panel_id})")
+                
                 # Qdrant에서 panel_id로 필터링하여 검색
                 qpoll_results = qdrant_client.scroll(
                     collection_name="qpoll_vectors_v2",
@@ -459,22 +461,34 @@ async def get_panel_details(panel_id: str):
                 # ✅ QPoll 데이터를 평탄화하여 panel_data에 추가
                 if qpoll_results and qpoll_results[0]:  # (points, next_page_offset)
                     points = qpoll_results[0]
+                    print(f"✅ QPoll 응답 {len(points)}개 발견")
                     
                     for idx, point in enumerate(points, 1):
                         if point.payload:
                             question = point.payload.get("question", "")
                             sentence = point.payload.get("sentence", "")
                             
-                            # ✅ "qpoll_1_question", "qpoll_1_answer" 형식으로 저장
-                            panel_data[f"qpoll_{idx}_질문"] = question
-                            panel_data[f"qpoll_{idx}_응답"] = sentence
+                            # ✅ "qpoll_1_질문", "qpoll_1_응답" 형식으로 저장
+                            panel_data[f"qpoll_{idx:03d}_질문"] = question
+                            panel_data[f"qpoll_{idx:03d}_응답"] = sentence
                     
-                    # QPoll 개수 저장 (선택사항)
+                    # QPoll 개수 저장
                     panel_data["qpoll_응답_개수"] = len(points)
+                    print(f"✅ QPoll 데이터 {len(points)}개 평탄화 완료")
+                else:
+                    print("⚠️  QPoll 응답 없음")
+                    panel_data["qpoll_응답_개수"] = 0
             
+            else:
+                print("⚠️  Qdrant 클라이언트 없음")
+                panel_data["qpoll_응답_개수"] = 0
+        
         except Exception as qpoll_error:
             # QPoll 조회 실패 시에도 Welcome 데이터는 반환
-            print(f"⚠️  QPoll 조회 실패 (panel_id: {panel_id}): {qpoll_error}")
+            print(f"❌ QPoll 조회 실패 (panel_id: {panel_id}): {qpoll_error}")
+            import traceback
+            traceback.print_exc()
+            panel_data["qpoll_응답_개수"] = 0
             panel_data["qpoll_조회_오류"] = str(qpoll_error)
         
         return panel_data
@@ -485,6 +499,7 @@ async def get_panel_details(panel_id: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"조회 실패: {str(e)}")
+    
 
 # ====================================================================
 # 5. 헬스체크

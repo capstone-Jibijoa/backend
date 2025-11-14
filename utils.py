@@ -201,16 +201,28 @@ WELCOME_OBJECTIVE_FIELDS = [
     ("region_major", "거주 지역"),
     ("region_minor", "세부 거주 지역"),
     ("marital_status", "결혼 여부"),
+    ("children_count","자녀수"),
+    ("family_size", "가족 수"),
+    ("education_level", "최종학력"),
     ("job_title_raw", "직업"),
-    ("income_personal_monthly", "개인 소득"),
+    ("job_duty_raw", "직무"),
+    ("income_personal_monthly", "월소득(개인)"),
+    ("income_household_monthly", "월소득(가구)"),
+    ("phone_brand_raw", "휴대폰 브랜드"),
+    ("phone_model_raw", "휴대폰 모델"),
+    ("car_ownership", "차량 보유 여부"),
+    ("car_manufacturer_raw", "차량 제조사"),
+    ("car_model_raw", "차량 모델명"),
+    ("smoking_experience", "흡연 여부"),
+    ("smoking_brand", "담배 종류"),
+    ("smoking_brand_etc_raw", "기타 담배 종류"),
+    ("e_cigarette_experience", "전자 담배 이용 경험"),
+    ("smoking_brand_other_details_raw", "기타 흡연 세부 사항"),
+    ("drinking_experience", "음주 경험"),
+    ("drinking_experience_other_details_raw", "음주 세부 사항")
 ]
 
 FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
-
-# ✅ 분석에서 제외할 raw 필드 (데이터가 너무 다양하거나 품질이 낮음)
-EXCLUDED_RAW_FIELDS = {
-    
-}
 
 def get_all_panels_data_from_db(limit: int = None) -> List[Dict]:
     """전체 패널 데이터 조회 (panel_id는 문자열)"""
