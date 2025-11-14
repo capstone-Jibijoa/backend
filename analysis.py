@@ -1,21 +1,92 @@
 import json
 import logging
+import re 
 from typing import List, Dict, Any, Tuple
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# utils.py와 db.py에서 필요한 함수를 import
 from utils import (
     extract_field_values,
     calculate_distribution,
     find_top_category,
     FIELD_NAME_MAP,
     WELCOME_OBJECTIVE_FIELDS,
-    get_panels_data_from_db # utils.py에 정의된 함수 사용
+    get_panels_data_from_db 
 )
-# 이 파일 내 DB 집계를 위해 Connection Pool import
 from db import get_db_connection_context
 
+# 1. 정적 매핑 규칙 (Python 코드로 관리)
+FIELD_MAPPING_RULES = [
+    # 정규식 기반 (순서 중요 - 구체적인 것부터)
+    (re.compile(r'^\d{2}대$'), {"field": "birth_year", "description": "연령대"}),
+    (re.compile(r'^\d{2}~\d{2}대$'), {"field": "birth_year", "description": "연령대"}),
+    (re.compile(r'젊은층|청년|MZ세대'), {"field": "birth_year", "description": "연령대"}),
+    (re.compile(r'.*(시|구|군)$'), {"field": "region_minor", "description": "세부 거주 지역"}),
+
+    ("서울", {"field": "region_major", "description": "거주 지역"}),
+    ("경기", {"field": "region_major", "description": "거주 지역"}),
+    ("부산", {"field": "region_major", "description": "거주 지역"}),
+    ("인천", {"field": "region_major", "description": "거주 지역"}),
+    ("대구", {"field": "region_major", "description": "거주 지역"}),
+    ("광주", {"field": "region_major", "description": "거주 지역"}),
+    ("대전", {"field": "region_major", "description": "거주 지역"}),
+    ("울산", {"field": "region_major", "description": "거주 지역"}),
+    ("세종", {"field": "region_major", "description": "거주 지역"}),
+    
+    ("남자", {"field": "gender", "description": "성별"}),
+    ("여성", {"field": "gender", "description": "성별"}),
+    ("남성", {"field": "gender", "description": "성별"}),
+    ("여자", {"field": "gender", "description": "성별"}),
+    
+    ("직장인", {"field": "job_title_raw", "description": "직업"}),
+    ("학생", {"field": "job_title_raw", "description": "직업"}),
+    ("주부", {"field": "job_title_raw", "description": "직업"}),
+    
+    ("고소득", {"field": "income_personal_monthly", "description": "소득"}),
+    ("저소득", {"field": "income_personal_monthly", "description": "소득"}),
+    
+    ("미혼", {"field": "marital_status", "description": "결혼 여부"}),
+    ("기혼", {"field": "marital_status", "description": "결혼 여부"}),
+    
+    ("흡연", {"field": "smoking_experience", "description": "흡연 경험"}),
+    ("비흡연", {"field": "smoking_experience", "description": "흡연 경험"}),
+    
+    ("음주", {"field": "drinking_experience", "description": "음주 경험"}),
+    ("금주", {"field": "drinking_experience", "description": "음주 경험"}),
+    
+    ("차량보유", {"field": "car_ownership", "description": "차량 보유"}),
+    ("차없음", {"field": "car_ownership", "description": "차량 보유"}),
+
+    ("it", {"field": "job_duty_raw", "description": "직무"}),
+    ("마케팅", {"field": "job_duty_raw", "description": "직무"}),
+
+    ("삼성", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
+    ("갤럭시", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
+    ("아이폰", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
+    ("애플", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
+    
+    ("현대차", {"field": "car_manufacturer_raw", "description": "차량 제조사"}),
+    ("기아", {"field": "car_manufacturer_raw", "description": "차량 제조사"}),
+]
+
+def get_field_mapping(keyword: str) -> Dict[str, str]:
+    """[누락된 함수] 키워드를 받아 매핑되는 필드 정보를 반환합니다."""
+    keyword_lower = keyword.lower()
+    
+    for pattern, mapping_info in FIELD_MAPPING_RULES:
+        if isinstance(pattern, re.Pattern): # 정규식 매칭
+            if pattern.match(keyword):
+                field = mapping_info["field"]
+                description = FIELD_NAME_MAP.get(field, mapping_info["description"])
+                return {"field": field, "description": description}
+        elif isinstance(pattern, str): # 문자열 일치
+            if pattern == keyword_lower:
+                field = mapping_info["field"]
+                description = FIELD_NAME_MAP.get(field, mapping_info["description"])
+                return {"field": field, "description": description}
+
+    logging.warning(f" ⚠️  '{keyword}'에 대한 매핑 규칙 없음. 'unknown'으로 처리.")
+    return {"field": "unknown", "description": keyword}
 
 def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str, float]:
     """
@@ -87,7 +158,6 @@ def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str
         logging.error(f"   DB 집계 실패 ({field_name}): {e}", exc_info=True)
         return {}
 
-
 def create_chart_data_optimized(
     keyword: str,
     field_name: str,
@@ -98,12 +168,10 @@ def create_chart_data_optimized(
 ) -> Dict:
     """
     차트 데이터 생성 (최적화 버전)
-    - use_full_db=True: 전체 DB 집계 (이 파일의 get_field_distribution_from_db 사용)
-    - use_full_db=False: 검색 결과(panels_data) 기반 집계 (utils.py의 extract_field_values 사용)
     """
     # 전체 DB 기반 분석
     if use_full_db:
-        logging.info(f"      → DB 집계로 '{field_name}' 분석 (최적화)")
+        logging.info(f"       → DB 집계로 '{field_name}' 분석 (최적화)")
         distribution = get_field_distribution_from_db(field_name, max_categories)
         
         if not distribution:
@@ -115,19 +183,16 @@ def create_chart_data_optimized(
             }
         
         top_category, top_ratio = find_top_category(distribution)
-        description_prefix = f"전체 데이터 기준 '{keyword}' 분석:"
+        description_prefix = f"전체 데이터 기준 '{korean_name}' 분석:"
         
         return {
             "topic": f"{korean_name} 분포",
             "description": f"{description_prefix} {top_ratio}%가 '{top_category}'입니다.",
             "ratio": f"{top_ratio}%",
-            "chart_data": [{
-                "label": korean_name,
-                "values": distribution
-            }]
+            "chart_data": [{"label": korean_name, "values": distribution}]
         }
     
-    # 검색 결과 기반 분석 (기존 로직)
+    # 검색 결과 기반 분석
     else:
         values = extract_field_values(panels_data, field_name)
         
@@ -175,7 +240,7 @@ def create_crosstab_chart(
     """
     교차 분석 차트 데이터를 생성합니다. (예: 연령대별 성별 분포)
     """
-    logging.info(f"      → 교차 분석으로 '{field1}' vs '{field2}' 분석")
+    logging.info(f"       → 교차 분석으로 '{field1}' vs '{field2}' 분석")
     from utils import get_age_group
 
     # 1. 두 필드에 대한 데이터 추출
@@ -216,7 +281,7 @@ def create_crosstab_chart(
     return {
         "topic": f"{field1_korean}별 {field2_korean} 분포",
         "description": f"'{field1_korean}'에 따른 '{field2_korean}'의 상대적 분포를 보여줍니다.",
-        "chart_type": "crosstab", # 프론트엔드에서 이 타입으로 분기
+        "chart_type": "crosstab",
         "chart_data": [{"label": f"{field1_korean}별 {field2_korean}", "values": chart_values}]
     }
 
@@ -236,7 +301,6 @@ def _analyze_fields_in_parallel(panels_data: List[Dict], candidate_fields: List[
                 continue
 
             if field_name == "birth_year":
-                # analysis.py의 get_age_group은 utils.py에 있으므로 import 필요
                 from utils import get_age_group
                 field_values[field_name].append(get_age_group(value))
             elif isinstance(value, list):
@@ -277,13 +341,9 @@ def find_high_ratio_fields_optimized(
     """
     candidate_fields = []
     
-    # utils.py에서 WELCOME_OBJECTIVE_FIELDS 목록을 가져와 사용
     for field_name, korean_name in WELCOME_OBJECTIVE_FIELDS:
         if field_name in exclude_fields:
             continue
-        # (필요시) 'job_duty_raw' 등 분석에서 제외할 필드 추가
-        # if field_name in ['job_duty_raw', 'phone_model_raw']:
-        #     continue
         candidate_fields.append((field_name, korean_name))
     
     if not candidate_fields:
@@ -291,7 +351,6 @@ def find_high_ratio_fields_optimized(
     
     logging.info(f"   🔍 {len(candidate_fields)}개 필드 병렬 분석 중...")
     
-    # 리팩토링된 함수를 사용하여 필드 분석
     analysis_results = _analyze_fields_in_parallel(panels_data, candidate_fields)
     
     high_ratio_results = []
@@ -329,7 +388,6 @@ def analyze_search_results_optimized(
 ) -> Tuple[Dict, int]:
     """
     검색 결과 분석 (최적화 버전)
-    main.py에서 이 함수를 호출합니다.
     """
     logging.info(f"📊 분석 시작 (최적화) - panel_id 수: {len(panel_id_list)}개")
     
@@ -338,8 +396,6 @@ def analyze_search_results_optimized(
     
     try:
         # 1단계: 패널 데이터 조회
-        # main.py에서 이 함수를 호출하기 전에 이미 panel_id_list (최대 5000개)를 만듦
-        # 이 데이터를 기반으로 분석을 수행
         logging.info("   1단계: 패널 데이터 조회 (utils.py 사용)")
         panels_data = get_panels_data_from_db(panel_id_list)
         
@@ -348,41 +404,48 @@ def analyze_search_results_optimized(
         
         logging.info(f"   ✅ {len(panels_data)}개 패널 데이터 조회 완료")
         
-        # 2단계: ranked_keywords 추출
-        ranked_keywords = classified_keywords.get('ranked_keywords', [])
-        search_used_fields = {kw.get('field') for kw in ranked_keywords if kw.get('field')}
+        # 2단계: ranked_keywords 추출 및 매핑
+        raw_keywords = classified_keywords.get('ranked_keywords_raw', [])
+        ranked_keywords = []
+        search_used_fields = set()
         
-        if not ranked_keywords:
-            # (fallback 로직 유지)
-            obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
-            for kw in obj_keywords[:5]:
-                field = _guess_field_from_keyword(kw)
-                korean_name = FIELD_NAME_MAP.get(field, field)
+        if raw_keywords:
+            logging.info(f"   2a단계: LLM 원본 키워드 {raw_keywords} 매핑 시작")
+            for i, keyword in enumerate(raw_keywords):
+                mapping = get_field_mapping(keyword) 
                 ranked_keywords.append({
-                    'keyword': kw, 'field': field, 'description': korean_name,
-                    'priority': len(ranked_keywords) + 1
+                    "keyword": keyword, "field": mapping["field"],
+                    "description": mapping["description"], "priority": i + 1
                 })
-                search_used_fields.add(field)
+                if mapping["field"] != 'unknown':
+                    search_used_fields.add(mapping["field"])
         
         if not ranked_keywords:
-            return {
-                "main_summary": f"총 {len(panels_data)}명 조회, 분석할 키워드 없음.",
-                "charts": []
-            }, 200
+            logging.warning("   ⚠️  'ranked_keywords_raw' 없음. objective 키워드로 fallback.")
+            obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
+            for i, kw in enumerate(obj_keywords[:5]):
+                mapping = get_field_mapping(kw)
+                ranked_keywords.append({
+                    'keyword': kw, 'field': mapping["field"],
+                    'description': mapping["description"], 'priority': i + 1
+                })
+                if mapping["field"] != 'unknown':
+                    search_used_fields.add(mapping["field"])
+            
+        if not ranked_keywords:
+            return { "main_summary": f"총 {len(panels_data)}명 조회, 분석할 키워드 없음.", "charts": [] }, 200
         
         ranked_keywords.sort(key=lambda x: x.get('priority', 999))
         logging.info(f"   ✅ 분석 키워드: {[k.get('keyword') for k in ranked_keywords]}")
         
-        # 3단계: ranked_keywords 기반 차트 생성 (전체 DB 집계 사용)
-        logging.info("   3단계: 주요 키워드 차트 생성 (DB 집계)")
+        # 3단계: ranked_keywords 기반 차트 생성
+        logging.info("   3단계: 주요 키워드 차트 생성 (DB 집계, 병렬)")
         charts = []
         used_fields = []
         objective_fields = set([f[0] for f in WELCOME_OBJECTIVE_FIELDS])
         
-        # --- ▼ [수정] 차트 생성을 병렬로 처리 ▼ ---
-        
         # 1. 생성할 차트 작업 목록 정의
-        chart_tasks = []
+        chart_tasks = [] 
         chart_count = 0
         for kw_info in ranked_keywords:
             if chart_count >= 2: break
@@ -390,46 +453,57 @@ def analyze_search_results_optimized(
             field = kw_info.get('field', '')
             if not field or field == 'unknown' or field not in objective_fields or field in used_fields:
                 continue
-                
+            
             chart_tasks.append(kw_info)
-            used_fields.append(field) # 
+            used_fields.append(field) 
             chart_count += 1
 
         # 2. ThreadPoolExecutor로 차트 생성 병렬 실행
-        with ThreadPoolExecutor(max_workers=len(chart_tasks) or 1) as executor:
-            # create_chart_data_optimized 함수를 병렬 호출
-            def create_chart_task(kw_info):
-                field = kw_info.get('field', '')
-                return create_chart_data_optimized(
-                    kw_info.get('keyword', ''), 
-                    field, 
-                    kw_info.get('description', FIELD_NAME_MAP.get(field, field)),
-                    panels_data, 
-                    use_full_db=True
-                )
+        if chart_tasks:
+            with ThreadPoolExecutor(max_workers=len(chart_tasks) or 1) as executor:
+                
+                def create_chart_task(kw_info):
+                    field = kw_info.get('field', '')
+                    logging.info(f"   ⚡ [{field}] 차트 DB 집계 스레드 시작...")
+                    return create_chart_data_optimized(
+                        kw_info.get('keyword', ''), 
+                        field, 
+                        kw_info.get('description', FIELD_NAME_MAP.get(field, field)),
+                        panels_data, 
+                        use_full_db=True
+                    )
 
-            futures = {executor.submit(create_chart_task, kw_info): kw_info for kw_info in chart_tasks}
+                futures = {executor.submit(create_chart_task, kw_info): kw_info for kw_info in chart_tasks}
+                
+                for future in as_completed(futures):
+                    kw_info_original = futures[future] 
+                    field_name = kw_info_original.get('field', 'unknown')
+                    try:
+                        chart = future.result() 
+                        if chart.get('chart_data') and chart.get('ratio') != '0.0%':
+                            chart['priority'] = kw_info_original.get('priority', 99)
+                            charts.append(chart)
+                            logging.info(f"   ✅ [{field_name}] 차트 생성 완료 (DB 집계)")
+                        else:
+                            logging.warning(f"   ⚠️  [{field_name}] 차트 데이터가 비어있음 (DB 집계)")
+                    except Exception as e:
+                        logging.error(f"   ❌ [{field_name}] 차트 생성 실패: {e}", exc_info=True)
             
-            for i, future in enumerate(as_completed(futures)):
-                chart = future.result()
-                if chart.get('chart_data') and chart.get('ratio') != '0.0%':
-                    charts.append(chart)
-                    logging.info(f"   ✅ [{i+1}] {chart_tasks[i].get('field')} 차트 생성 (DB 집계)")
-        
-        # (필요시) 순서를 위해 priority로 다시 정렬
-        charts.sort(key=lambda x: [kw.get('priority', 99) for kw in chart_tasks if kw.get('description') in x.get('topic', '')] or [99])
-        
-        # 3.5단계: 교차 분석 차트 생성 (검색 결과 기반)
+            charts.sort(key=lambda x: x.get('priority', 99))
+            
+            for chart in charts:
+                if 'priority' in chart:
+                    del chart['priority']
+
+        # 3.5단계: 교차 분석 차트 생성
         logging.info("   3.5단계: 교차 분석 차트 생성")
         if len(charts) < 5 and len(ranked_keywords) > 0:
             primary_kw = ranked_keywords[0]
             primary_field = primary_kw.get('field')
             primary_korean_name = primary_kw.get('description')
-
-            # 교차분석할 두 번째 필드 선택 (gender가 좋은 후보)
             secondary_field, secondary_korean_name = "gender", "성별"
 
-            if primary_field and primary_field != secondary_field:
+            if primary_field and primary_field != secondary_field and primary_field in objective_fields:
                 crosstab_chart = create_crosstab_chart(
                     panels_data,
                     primary_field, secondary_field,
@@ -437,10 +511,10 @@ def analyze_search_results_optimized(
                 )
                 if crosstab_chart:
                     charts.append(crosstab_chart)
-                    used_fields.append(primary_field) # 중복 방지
+                    used_fields.append(primary_field) 
                     logging.info(f"   ✅ [{len(charts)}] 교차 분석 차트 생성 ({primary_korean_name} vs {secondary_korean_name})")
 
-        # 4단계: 높은 비율 필드 찾기 (검색 결과(panels_data) 기반)
+        # 4단계: 높은 비율 필드 찾기
         logging.info("   4단계: 높은 비율 필드 차트 생성 (검색 결과 기반)")
         needed_charts = 5 - len(charts)
         exclude_fields_for_step4 = list(set(used_fields) | search_used_fields)
@@ -460,10 +534,7 @@ def analyze_search_results_optimized(
                     "topic": f"{field_info['korean_name']} 분포",
                     "description": f"{field_info['top_ratio']:.1f}%가 '{field_info['top_category']}'로 뚜렷한 패턴을 보입니다.",
                     "ratio": f"{field_info['top_ratio']:.1f}%",
-                    "chart_data": [{
-                        "label": field_info['korean_name'],
-                        "values": field_info['distribution']
-                    }]
+                    "chart_data": [{"label": field_info['korean_name'], "values": field_info['distribution']}]
                 }
                 charts.append(chart)
                 logging.info(f"   ✅ [{len(charts)}] {field_info['korean_name']} ({field_info['top_ratio']:.1f}%) 차트 생성")
@@ -472,6 +543,13 @@ def analyze_search_results_optimized(
         main_summary = f"총 {len(panels_data)}명의 응답자 데이터를 분석했습니다. "
         if charts:
             top_chart = charts[0]
+            summary_desc = top_chart.get('description', '')
+            if '전체 데이터 기준' in summary_desc:
+                summary_desc = summary_desc.split(':', 1)[-1].strip()
+            elif ':' in summary_desc:
+                 summary_desc = summary_desc.split(':', 1)[-1].strip()
+            
+            # ‼️ [수정] 요약 문구 수정
             main_summary += f"주요 분석 결과: {top_chart.get('topic', '')}에서 {top_chart.get('ratio', '0%')}의 비율을 보입니다."
         
         result = {
@@ -488,11 +566,3 @@ def analyze_search_results_optimized(
         logging.error(f"❌ 분석 실패: {e}", exc_info=True)
         return {"main_summary": f"분석 중 오류 발생: {str(e)}", "charts": []}, 500
 
-def _guess_field_from_keyword(keyword: str) -> str:
-    """키워드로부터 필드명 추정 (Fallback용)"""
-    kw = keyword.strip().lower()
-    if kw in ['남자', '남성', '남', '여자', '여성', '여']: return 'gender'
-    if '대' in keyword and keyword[:-1].isdigit(): return 'birth_year'
-    if keyword in ['서울', '경기', '부산']: return 'region_major'
-    if keyword.endswith(('시', '구', '군')): return 'region_minor'
-    return 'gender'
