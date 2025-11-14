@@ -17,80 +17,77 @@ from db import get_db_connection_context
 
 # 1. 정적 매핑 규칙 (Python 코드로 관리)
 FIELD_MAPPING_RULES = [
-    # 정규식 기반 (순서 중요 - 구체적인 것부터)
-    (re.compile(r'^\d{2}대$'), {"field": "birth_year", "description": "연령대"}),
-    (re.compile(r'^\d{2}~\d{2}대$'), {"field": "birth_year", "description": "연령대"}),
-    (re.compile(r'젊은층|청년|MZ세대'), {"field": "birth_year", "description": "연령대"}),
-    (re.compile(r'.*(시|구|군)$'), {"field": "region_minor", "description": "세부 거주 지역"}),
+    # --- type: "filter" (객관식 필터용) ---
+    (re.compile(r'^\d{2}대$'), 
+     {"field": "birth_year", "description": "연령대", "type": "filter"}),
+    (re.compile(r'^\d{2}~\d{2}대$'), 
+     {"field": "birth_year", "description": "연령대", "type": "filter"}),
+    (re.compile(r'젊은층|청년|MZ세대'), 
+     {"field": "birth_year", "description": "연령대", "type": "filter"}),
+    
+    (re.compile(r'^(서울|경기|부산|인천|대구|광주|대전|울산|세종|강원|충북|충남|전북|전남|경북|경남|제주)(특별)?(자?치)?(시|도|광역)?$', re.IGNORECASE), 
+     {"field": "region_major", "description": "거주 지역", "type": "filter"}),
+    
+    (re.compile(r'.*(시|구|군)$'), 
+     {"field": "region_minor", "description": "세부 거주 지역", "type": "filter"}),
 
-    ("서울", {"field": "region_major", "description": "거주 지역"}),
-    ("경기", {"field": "region_major", "description": "거주 지역"}),
-    ("부산", {"field": "region_major", "description": "거주 지역"}),
-    ("인천", {"field": "region_major", "description": "거주 지역"}),
-    ("대구", {"field": "region_major", "description": "거주 지역"}),
-    ("광주", {"field": "region_major", "description": "거주 지역"}),
-    ("대전", {"field": "region_major", "description": "거주 지역"}),
-    ("울산", {"field": "region_major", "description": "거주 지역"}),
-    ("세종", {"field": "region_major", "description": "거주 지역"}),
+    (re.compile(r'^(남|남자|남성)$', re.IGNORECASE), 
+     {"field": "gender", "description": "성별", "type": "filter"}),
+    (re.compile(r'^(여|여자|여성)$', re.IGNORECASE), 
+     {"field": "gender", "description": "성별", "type": "filter"}),
     
-    ("남자", {"field": "gender", "description": "성별"}),
-    ("여성", {"field": "gender", "description": "성별"}),
-    ("남성", {"field": "gender", "description": "성별"}),
-    ("여자", {"field": "gender", "description": "성별"}),
+    ("미혼", {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
+    ("기혼", {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
     
-    ("직장인", {"field": "job_title_raw", "description": "직업"}),
-    ("학생", {"field": "job_title_raw", "description": "직업"}),
-    ("주부", {"field": "job_title_raw", "description": "직업"}),
+    ("흡연", {"field": "smoking_experience", "description": "흡연 경험", "type": "filter"}),
+    ("비흡연", {"field": "smoking_experience", "description": "흡연 경험", "type": "filter"}),
     
-    ("고소득", {"field": "income_personal_monthly", "description": "소득"}),
-    ("저소득", {"field": "income_personal_monthly", "description": "소득"}),
+    ("음주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
+    ("금주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
     
-    ("미혼", {"field": "marital_status", "description": "결혼 여부"}),
-    ("기혼", {"field": "marital_status", "description": "결혼 여부"}),
-    
-    ("흡연", {"field": "smoking_experience", "description": "흡연 경험"}),
-    ("비흡연", {"field": "smoking_experience", "description": "흡연 경험"}),
-    
-    ("음주", {"field": "drinking_experience", "description": "음주 경험"}),
-    ("금주", {"field": "drinking_experience", "description": "음주 경험"}),
-    
-    ("차량보유", {"field": "car_ownership", "description": "차량 보유"}),
-    ("차없음", {"field": "car_ownership", "description": "차량 보유"}),
-
-    ("it", {"field": "job_duty_raw", "description": "직무"}),
-    ("마케팅", {"field": "job_duty_raw", "description": "직무"}),
-
-    ("삼성", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
-    ("갤럭시", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
-    ("아이폰", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
-    ("애플", {"field": "phone_brand_raw", "description": "휴대폰 브랜드"}),
-    
-    ("현대차", {"field": "car_manufacturer_raw", "description": "차량 제조사"}),
-    ("기아", {"field": "car_manufacturer_raw", "description": "차량 제조사"}),
+    ("차량보유", {"field": "car_ownership", "description": "차량 보유", "type": "filter"}),
+    ("차없음", {"field": "car_ownership", "description": "차량 보유", "type": "filter"}),
+    # 개념/주관식 키워드는 모두 제거 -> 'unknown' 처리되어 벡터 검색으로 유도
 ]
 
 def get_field_mapping(keyword: str) -> Dict[str, str]:
-    """[누락된 함수] 키워드를 받아 매핑되는 필드 정보를 반환합니다."""
-    keyword_lower = keyword.lower()
+    """
+    [수정됨] 키워드를 받아 매핑되는 필드 정보와 "타입"을 반환합니다.
+    필터 규칙에 없으면 'unknown'으로 반환합니다.
+    """
+    keyword_for_string_match = keyword.lower() 
     
     for pattern, mapping_info in FIELD_MAPPING_RULES:
-        if isinstance(pattern, re.Pattern): # 정규식 매칭
-            if pattern.match(keyword):
-                field = mapping_info["field"]
-                description = FIELD_NAME_MAP.get(field, mapping_info["description"])
-                return {"field": field, "description": description}
-        elif isinstance(pattern, str): # 문자열 일치
-            if pattern == keyword_lower:
-                field = mapping_info["field"]
-                description = FIELD_NAME_MAP.get(field, mapping_info["description"])
-                return {"field": field, "description": description}
+        
+        # [수정] 'type'을 명시적으로 확인 (기본값 'filter')
+        rule_type = mapping_info.get("type", "filter")
+        if rule_type != "filter": # (혹시 모를 실수를 방지하기 위해)
+            continue
+            
+        field = mapping_info["field"]
+        description = FIELD_NAME_MAP.get(field, mapping_info["description"])
 
-    logging.warning(f" ⚠️  '{keyword}'에 대한 매핑 규칙 없음. 'unknown'으로 처리.")
-    return {"field": "unknown", "description": keyword}
+        if isinstance(pattern, re.Pattern):
+            if pattern.match(keyword): 
+                return {"field": field, 
+                        "description": description, 
+                        "type": "filter"}
+        elif isinstance(pattern, str):
+            if pattern == keyword_for_string_match:
+                return {"field": field, 
+                        "description": description, 
+                        "type": "filter"}
+            
+    # '간호직', 'OTT', 'it' 등 필터 규칙에 없는 모든 키워드는 'unknown'으로 처리
+    # (주의: search.py의 파서가 'unknown' 타입을 'vector'로 해석해야 함)
+    logging.warning(f" ⚠️  '{keyword}'에 대한 매핑 규칙 없음. 'unknown'(벡터)으로 처리.")
+    return {"field": "unknown", "description": keyword, "type": "unknown"}
+
 
 def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str, float]:
     """
     PostgreSQL에서 직접 집계하여 필드 분포 조회 (전체 DB 대상)
+    (캐시 롤백 버전)
     """
     try:
         with get_db_connection_context() as conn:
@@ -105,11 +102,11 @@ def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str
                     WITH age_groups AS (
                         SELECT 
                             CASE 
-                                WHEN (2025 - (structured_data->>'birth_year')::int) < 20 THEN '10대'
-                                WHEN (2025 - (structured_data->>'birth_year')::int) < 30 THEN '20대'
-                                WHEN (2025 - (structured_data->>'birth_year')::int) < 40 THEN '30대'
-                                WHEN (2025 - (structured_data->>'birth_year')::int) < 50 THEN '40대'
-                                WHEN (2025 - (structured_data->>'birth_year')::int) < 60 THEN '50대'
+                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 20 THEN '10대'
+                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 30 THEN '20대'
+                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 40 THEN '30대'
+                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 50 THEN '40대'
+                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 60 THEN '50대'
                                 ELSE '60대 이상'
                             END as age_group
                         FROM welcome_meta2
@@ -228,7 +225,6 @@ def create_chart_data_optimized(
             }]
         }
 
-
 def create_crosstab_chart(
     panels_data: List[Dict],
     field1: str,  # 주축 (e.g., 'birth_year')
@@ -342,23 +338,31 @@ def find_high_ratio_fields_optimized(
     candidate_fields = []
     
     for field_name, korean_name in WELCOME_OBJECTIVE_FIELDS:
-        if field_name in exclude_fields:
-            continue
-        candidate_fields.append((field_name, korean_name))
+        if field_name not in exclude_fields:
+            candidate_fields.append((field_name, korean_name))
     
     if not candidate_fields:
         return []
     
-    logging.info(f"   🔍 {len(candidate_fields)}개 필드 병렬 분석 중...")
+    logging.info(f"   🔍 {len(candidate_fields)}개 필드 병렬 분석 중... (제외 필드: {exclude_fields})")
     
     analysis_results = _analyze_fields_in_parallel(panels_data, candidate_fields)
     
     high_ratio_results = []
     for result in analysis_results:
         distribution = result['distribution']
+        
+        # 100% 단일 카테고리 스킵
+        if len(distribution) == 1:
+            top_category, top_ratio = find_top_category(distribution) 
+            logging.info(f"   ⚠️  [{result['korean_name']}] 스킵: {top_category} {top_ratio}% (단일 카테고리 100%)")
+            continue
+        
         top_category, top_ratio = find_top_category(distribution)
         
+        # 50% 이상이라는 1차 임계값 통과 시
         if top_ratio >= threshold:
+        
             final_distribution = distribution
             if len(distribution) > 10:
                 sorted_items = sorted(distribution.items(), key=lambda x: x[1], reverse=True)
@@ -379,7 +383,6 @@ def find_high_ratio_fields_optimized(
     high_ratio_results.sort(key=lambda x: x["top_ratio"], reverse=True)
     
     return high_ratio_results[:max_charts]
-
 
 def analyze_search_results_optimized(
     query: str,
@@ -405,31 +408,45 @@ def analyze_search_results_optimized(
         logging.info(f"   ✅ {len(panels_data)}개 패널 데이터 조회 완료")
         
         # 2단계: ranked_keywords 추출 및 매핑
+        # (주의: search.py에서 LLM 대신 규칙 기반 파서로 대체되었다면
+        #       classified_keywords['ranked_keywords_raw']가 올바르게 전달되어야 함)
         raw_keywords = classified_keywords.get('ranked_keywords_raw', [])
         ranked_keywords = []
         search_used_fields = set()
         
         if raw_keywords:
-            logging.info(f"   2a단계: LLM 원본 키워드 {raw_keywords} 매핑 시작")
+            logging.info(f"   2a단계: (규칙 기반) 키워드 {raw_keywords} 매핑 시작")
             for i, keyword in enumerate(raw_keywords):
+                
                 mapping = get_field_mapping(keyword) 
+                kw_type = mapping.get("type", "unknown")
+                
                 ranked_keywords.append({
-                    "keyword": keyword, "field": mapping["field"],
-                    "description": mapping["description"], "priority": i + 1
+                    "keyword": keyword, 
+                    "field": mapping["field"],
+                    "description": mapping["description"], 
+                    "type": kw_type, # [수정] type 정보 저장
+                    "priority": i + 1
                 })
-                if mapping["field"] != 'unknown':
+                
+                # [수정] 'filter' 타입이고 'unknown'이 아닌 경우에만 '뻔한 필드'로 추가
+                if kw_type == 'filter' and mapping["field"] != 'unknown':
                     search_used_fields.add(mapping["field"])
         
         if not ranked_keywords:
-            logging.warning("   ⚠️  'ranked_keywords_raw' 없음. objective 키워드로 fallback.")
+            logging.warning("   ⚠️  'ranked_keywords_raw' 없음. (Fallback 로직 실행)")
+            # (Fallback 로직은 LLM을 사용하지 않으므로 수정이 필요할 수 있음)
             obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
             for i, kw in enumerate(obj_keywords[:5]):
-                mapping = get_field_mapping(kw)
+                mapping = get_field_mapping(kw) # [수정] 수정된 함수 호출
                 ranked_keywords.append({
-                    'keyword': kw, 'field': mapping["field"],
-                    'description': mapping["description"], 'priority': i + 1
+                    'keyword': kw, 
+                    'field': mapping["field"],
+                    'description': mapping["description"], 
+                    'type': mapping.get("type", "unknown"), # [수정] type 정보 저장
+                    'priority': i + 1
                 })
-                if mapping["field"] != 'unknown':
+                if mapping["type"] == 'filter' and mapping["field"] != 'unknown': # [수정] type 체크
                     search_used_fields.add(mapping["field"])
             
         if not ranked_keywords:
@@ -437,6 +454,7 @@ def analyze_search_results_optimized(
         
         ranked_keywords.sort(key=lambda x: x.get('priority', 999))
         logging.info(f"   ✅ 분석 키워드: {[k.get('keyword') for k in ranked_keywords]}")
+        logging.info(f"   ✅ 검색 사용 필드 (뻔한 인사이트 제외용): {search_used_fields}")
         
         # 3단계: ranked_keywords 기반 차트 생성
         logging.info("   3단계: 주요 키워드 차트 생성 (DB 집계, 병렬)")
@@ -451,7 +469,11 @@ def analyze_search_results_optimized(
             if chart_count >= 2: break
             
             field = kw_info.get('field', '')
-            if not field or field == 'unknown' or field not in objective_fields or field in used_fields:
+            kw_type = kw_info.get('type', 'unknown') # [수정] type 가져오기
+            
+            # [수정] 'filter' 타입인 키워드만 3단계 차트 생성
+            if kw_type != 'filter' or not field or field == 'unknown' or field not in objective_fields or field in used_fields:
+                # ('it', '간호직' 등 벡터/unknown 키워드는 여기서 차트 생성 안 함)
                 continue
             
             chart_tasks.append(kw_info)
@@ -498,12 +520,43 @@ def analyze_search_results_optimized(
         # 3.5단계: 교차 분석 차트 생성
         logging.info("   3.5단계: 교차 분석 차트 생성")
         if len(charts) < 5 and len(ranked_keywords) > 0:
-            primary_kw = ranked_keywords[0]
-            primary_field = primary_kw.get('field')
-            primary_korean_name = primary_kw.get('description')
-            secondary_field, secondary_korean_name = "gender", "성별"
-
-            if primary_field and primary_field != secondary_field and primary_field in objective_fields:
+            
+            CROSSTAB_CANDIDATES = [
+                ('gender', '성별'),
+                ('birth_year', '연령대'),
+                ('marital_status', '결혼 여부'),
+                ('income_personal_monthly', '소득 수준'),
+                ('job_duty_raw', '직무'), 
+                ('job_title_raw', '직업'),
+            ]
+            
+            primary_kw = None
+            for kw in ranked_keywords:
+                if kw.get("type") == "filter":
+                    primary_kw = kw
+                    break 
+            
+            primary_field = None
+            primary_korean_name = None
+            
+            if primary_kw:
+                primary_field = primary_kw.get('field')
+                primary_korean_name = primary_kw.get('description')
+            
+            secondary_field = None
+            secondary_korean_name = None
+            
+            if primary_field and primary_field != 'unknown' and primary_field in objective_fields:
+                for field, korean in CROSSTAB_CANDIDATES:
+                    if field == primary_field or field in search_used_fields:
+                        continue
+                    
+                    secondary_field = field
+                    secondary_korean_name = korean
+                    logging.info(f"   ✨ 새 교차분석 축 발견: '{primary_korean_name}' vs '{secondary_korean_name}'")
+                    break
+            
+            if secondary_field:
                 crosstab_chart = create_crosstab_chart(
                     panels_data,
                     primary_field, secondary_field,
@@ -511,17 +564,25 @@ def analyze_search_results_optimized(
                 )
                 if crosstab_chart:
                     charts.append(crosstab_chart)
-                    used_fields.append(primary_field) 
+                    if primary_field not in used_fields:
+                         used_fields.append(primary_field) 
+                    # [수정] 교차분석 보조축도 제외 목록에 추가
+                    if secondary_field not in used_fields:
+                        used_fields.append(secondary_field)
                     logging.info(f"   ✅ [{len(charts)}] 교차 분석 차트 생성 ({primary_korean_name} vs {secondary_korean_name})")
-
+            else:
+                logging.warning("   ⚠️  교차 분석 스킵: 1순위 필터 키워드가 없거나, 적절한 보조축 후보가 없음 (모두 검색어에 포함됨)")
+                
         # 4단계: 높은 비율 필드 찾기
         logging.info("   4단계: 높은 비율 필드 차트 생성 (검색 결과 기반)")
         needed_charts = 5 - len(charts)
+        # 3.5단계에서 보조축까지 제외됨
         exclude_fields_for_step4 = list(set(used_fields) | search_used_fields)
         
         if needed_charts > 0:
             high_ratio_fields = find_high_ratio_fields_optimized(
                 panels_data, 
+                # [롤백] 검색에 사용된 필드와 이미 차트로 만들어진 필드를 제외
                 exclude_fields=exclude_fields_for_step4,
                 threshold=50.0,
                 max_charts=needed_charts
@@ -549,7 +610,6 @@ def analyze_search_results_optimized(
             elif ':' in summary_desc:
                  summary_desc = summary_desc.split(':', 1)[-1].strip()
             
-            # ‼️ [수정] 요약 문구 수정
             main_summary += f"주요 분석 결과: {top_chart.get('topic', '')}에서 {top_chart.get('ratio', '0%')}의 비율을 보입니다."
         
         result = {
@@ -565,4 +625,3 @@ def analyze_search_results_optimized(
     except Exception as e:
         logging.error(f"❌ 분석 실패: {e}", exc_info=True)
         return {"main_summary": f"분석 중 오류 발생: {str(e)}", "charts": []}, 500
-
