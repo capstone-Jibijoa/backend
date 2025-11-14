@@ -1,153 +1,104 @@
-"""
-공통 유틸리티 함수 모음
-"""
+import logging
+import datetime
 from collections import Counter
 from typing import List, Dict, Any, Tuple
-import re
-from db_logic import get_db_connection
-from typing import Dict, List, Any # 상단에 추가
+from db import get_db_connection_context # 수정된 import
 import datetime
+
+# 이 맵은 analysis.py와 utils.py 모두에서 사용됩니다.
+WELCOME_OBJECTIVE_FIELDS = [
+    ("gender", "성별"),
+    ("birth_year", "연령대"),
+    ("region_major", "거주 지역"),
+    ("region_minor", "세부 거주 지역"),
+    ("marital_status", "결혼 여부"),
+    ("children_count","자녀수"),
+    ("family_size", "가족 수"),
+    ("education_level", "최종학력"),
+    ("job_title_raw", "직업"),
+    ("job_duty_raw", "직무"),
+    ("income_personal_monthly", "월소득(개인)"),
+    ("income_household_monthly", "월소득(가구)"),
+    ("phone_brand_raw", "휴대폰 브랜드"),
+    ("phone_model_raw", "휴대폰 모델"),
+    ("car_ownership", "차량 보유 여부"),
+    ("car_manufacturer_raw", "차량 제조사"),
+    ("car_model_raw", "차량 모델명"),
+    ("smoking_experience", "흡연 여부"),
+    ("smoking_brand", "담배 종류"),
+    ("smoking_brand_etc_raw", "기타 담배 종류"),
+    ("e_cigarette_experience", "전자 담배 이용 경험"),
+    ("smoking_brand_other_details_raw", "기타 흡연 세부 사항"),
+    ("drinking_experience", "음주 경험"),
+    ("drinking_experience_other_details_raw", "음주 세부 사항")
+]
+FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
+
 
 def get_db_distribution(field_name: str) -> Dict[str, float]:
     """
-    DB에서 직접 필드 분포를 집계합니다.
+    [삭제 가능성 검토]
+    DB에서 직접 필드 분포를 집계합니다. (analysis.py의 함수와 중복됨)
+    만약 analysis.py 외 다른 곳에서 이 함수를 쓰지 않는다면 삭제해도 됩니다.
     """
-    conn = None
     total_count = 0
     distribution = {}
     
     try:
-        conn = get_db_connection()
-        if not conn:
-            return {}
-        cur = conn.cursor()
+        # Connection Pool 사용
+        with get_db_connection_context() as conn:
+            if not conn:
+                return {}
+            cur = conn.cursor()
 
-        query = ""
-        total_count_query = ""
-        
-        # 1. 필드별로 SQL 쿼리 분기
-        if field_name == "birth_year":
-            # 1-1. 'birth_year' (나이) 처리
-            current_year = datetime.datetime.now().year # ✅ 동적 연도 계산
+            query = ""
+            total_count_query = ""
             
-            total_count_query = "SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'birth_year' ~ '^[0-9]+$'"
-            
-            query = f"""
-                SELECT 
-                    CASE
+            if field_name == "birth_year":
+                current_year = datetime.datetime.now().year
+                total_count_query = "SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'birth_year' ~ '^[0-9]+$'"
+                query = f"""
+                    SELECT CASE
                         WHEN ({current_year} - (structured_data->>'birth_year')::int) < 20 THEN '10대'
                         WHEN ({current_year} - (structured_data->>'birth_year')::int) < 30 THEN '20대'
                         WHEN ({current_year} - (structured_data->>'birth_year')::int) < 40 THEN '30대'
                         WHEN ({current_year} - (structured_data->>'birth_year')::int) < 50 THEN '40대'
                         WHEN ({current_year} - (structured_data->>'birth_year')::int) < 60 THEN '50대'
                         ELSE '60대 이상'
-                    END as item,
-                    COUNT(*) as count
-                FROM welcome_meta2
-                WHERE structured_data->>'birth_year' ~ '^[0-9]+$'
-                GROUP BY item
-                ORDER BY item
-            """
-        
-        else:
-            # 1-2. 'gender', 'region_major' 등 그 외 필드 처리
-            total_count_query = f"SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL"
+                    END as item, COUNT(*) as count
+                    FROM welcome_meta2
+                    WHERE structured_data->>'birth_year' ~ '^[0-9]+$'
+                    GROUP BY item ORDER BY item
+                """
+            else:
+                total_count_query = f"SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL"
+                query = f"""
+                    SELECT structured_data->>'{field_name}' as item, COUNT(*) as count
+                    FROM welcome_meta2
+                    WHERE structured_data->>'{field_name}' IS NOT NULL
+                    GROUP BY item ORDER BY count DESC
+                """
             
-            query = f"""
-                SELECT 
-                    structured_data->>'{field_name}' as item, 
-                    COUNT(*) as count
-                FROM welcome_meta2
-                WHERE structured_data->>'{field_name}' IS NOT NULL
-                GROUP BY item
-                ORDER BY count DESC
-            """
-        
-        # 2. 쿼리 실행 (공통 로직)
-        
-        # 2-1. 전체 카운트
-        cur.execute(total_count_query)
-        total_count = cur.fetchone()[0]
-        
-        if total_count == 0:
-            cur.close()
-            return {}
+            cur.execute(total_count_query)
+            total_count = cur.fetchone()[0]
+            
+            if total_count == 0:
+                cur.close()
+                return {}
 
-        # 2-2. 분포 쿼리
-        cur.execute(query)
-        rows = cur.fetchall()
-        cur.close()
+            cur.execute(query)
+            rows = cur.fetchall()
+            cur.close()
         
-        # 3. 백분율로 변환
         distribution = {str(item): round((count / total_count) * 100, 1) for item, count in rows}
         return distribution
         
     except Exception as e:
-        # field_name을 포함하여 에러 로그 출력
-        print(f"❌ DB 집계 실패 ({field_name}): {e}")
+        logging.error(f"DB 집계 실패 ({field_name}): {e}", exc_info=True)
         return {}
     finally:
-        if conn:
-            conn.close()
+        pass # Context manager가 연결을 닫음
 
-def build_sql_conditions_from_keywords(keywords: List[str], current_year: int = 2025) -> Tuple[str, List[Any]]:
-    """키워드 리스트를 SQL WHERE 조건으로 변환"""
-    conditions = []
-    params = []
-    regions_major = []
-    regions_minor = []
-    
-    for keyword in keywords:
-        kw = keyword.strip().lower()
-        
-        if kw in ['남자', '남성', '남']:
-            conditions.append(
-                "(structured_data->>'gender' IS NOT NULL "
-                "AND structured_data->>'gender' = %s)"
-            )
-            params.append('M')
-        elif kw in ['여자', '여성', '여']:
-            conditions.append(
-                "(structured_data->>'gender' IS NOT NULL "
-                "AND structured_data->>'gender' = %s)"
-            )
-            params.append('F')
-        elif keyword in ['서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종',
-                        '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주']:
-            regions_major.append(keyword)
-        elif keyword.endswith(('시', '구', '군')):
-            regions_minor.append(keyword)
-        
-        elif '대' in keyword and keyword[:-1].isdigit():
-            age_prefix = int(keyword[:-1])
-            birth_start = current_year - age_prefix - 9
-            birth_end = current_year - age_prefix
-            conditions.append(
-                "(structured_data->>'birth_year' IS NOT NULL "
-                "AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)"
-            )
-            params.extend([birth_start, birth_end])
-    
-    if len(regions_major) == 1:
-        conditions.append("(structured_data->>'region_major' = %s)")
-        params.append(regions_major[0])
-    elif len(regions_major) > 1:
-        placeholders = ','.join(['%s'] * len(regions_major))
-        conditions.append(f"(structured_data->>'region_major' IN ({placeholders}))")
-        params.extend(regions_major)
-    
-    if len(regions_minor) == 1:
-        conditions.append("(structured_data->>'region_minor' = %s)")
-        params.append(regions_minor[0])
-    elif len(regions_minor) > 1:
-        placeholders = ','.join(['%s'] * len(regions_minor))
-        conditions.append(f"(structured_data->>'region_minor' IN ({placeholders}))")
-        params.extend(regions_minor)
-    
-    if not conditions:
-        return "", []
-    
-    return " WHERE " + " AND ".join(conditions), params
 
 def calculate_age_from_birth_year(birth_year, current_year: int = 2025) -> int:
     """출생연도로부터 나이 계산"""
@@ -181,113 +132,54 @@ def find_top_category(distribution: Dict[str, float]) -> Tuple[str, float]:
     return max(distribution.items(), key=lambda x: x[1])
 
 def extract_field_values(data: List[Dict], field_name: str) -> List[Any]:
-    """데이터에서 특정 필드의 값들을 추출"""
+    """데이터에서 특정 필드의 값들을 추출 (analysis.py에서 사용)"""
     values = []
-    
+
     if field_name == "birth_year":
         values = [get_age_group(item.get(field_name, 0)) for item in data if item.get(field_name)]
-    elif field_name == "region_major":
-        values = [item.get("region_major") for item in data if item.get("region_major")]
-    elif field_name == "region_minor":
-        values = [item.get("region_minor") for item in data if item.get("region_minor")]
     else:
-        values = [item.get(field_name) for item in data if item.get(field_name)]
-    
-    return values
+        raw_values = [item.get(field_name) for item in data if item.get(field_name)]
+        for val in raw_values:
+            if isinstance(val, list):
+                # 값이 리스트이면, 각 원소를 개별 값으로 추가
+                values.extend(val)
+            elif val is not None:
+                # 리스트가 아니면 값을 그대로 추가
+                values.append(val)
 
-WELCOME_OBJECTIVE_FIELDS = [
-    ("gender", "성별"),
-    ("birth_year", "연령대"),
-    ("region_major", "거주 지역"),
-    ("region_minor", "세부 거주 지역"),
-    ("marital_status", "결혼 여부"),
-    ("children_count","자녀수"),
-    ("family_size", "가족 수"),
-    ("education_level", "최종학력"),
-    ("job_title_raw", "직업"),
-    ("job_duty_raw", "직무"),
-    ("income_personal_monthly", "월소득(개인)"),
-    ("income_household_monthly", "월소득(가구)"),
-    ("phone_brand_raw", "휴대폰 브랜드"),
-    ("phone_model_raw", "휴대폰 모델"),
-    ("car_ownership", "차량 보유 여부"),
-    ("car_manufacturer_raw", "차량 제조사"),
-    ("car_model_raw", "차량 모델명"),
-    ("smoking_experience", "흡연 여부"),
-    ("smoking_brand", "담배 종류"),
-    ("smoking_brand_etc_raw", "기타 담배 종류"),
-    ("e_cigarette_experience", "전자 담배 이용 경험"),
-    ("smoking_brand_other_details_raw", "기타 흡연 세부 사항"),
-    ("drinking_experience", "음주 경험"),
-    ("drinking_experience_other_details_raw", "음주 세부 사항")
-]
+    return [v for v in values if v is not None]
 
-FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
-
-def get_all_panels_data_from_db(limit: int = None) -> List[Dict]:
-    """전체 패널 데이터 조회 (panel_id는 문자열)"""
-    from db_logic import get_db_connection
-    conn = None
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return []
-        cur = conn.cursor()
-        
-        query = f"SELECT panel_id, structured_data FROM welcome_meta2"
-        if limit:
-            query += f" LIMIT {limit}"
-        
-        cur.execute(query)
-        rows = cur.fetchall()
-        
-        panels_data = []
-        for panel_id, structured_data in rows:
-            if isinstance(structured_data, dict):
-                panel = {'panel_id': panel_id}
-                panel.update(structured_data)
-                panels_data.append(panel)
-        
-        cur.close()
-        return panels_data
-    except Exception as e:
-        print(f"❌ 전체 패널 데이터 조회 실패: {e}")
-        return []
-    finally:
-        if conn:
-            conn.close()
 
 def get_panels_data_from_db(panel_id_list: List[str]) -> List[Dict]:
-    """panel_id 리스트로부터 패널 데이터 조회 (panel_id는 문자열)"""
+    """
+    [analysis.py에서 사용]
+    panel_id 리스트로부터 패널 데이터 조회 (Connection Pool 사용)
+    """
     if not panel_id_list:
         return []
     
-    from db_logic import get_db_connection
-    conn = None
+    panels_data = []
     try:
-        conn = get_db_connection()
-        if not conn:
-            return []
-        cur = conn.cursor()
-        
-        placeholders = ','.join(['%s'] * len(panel_id_list))
-        query = f"SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id IN ({placeholders})"
-        
-        cur.execute(query, tuple(panel_id_list))
-        rows = cur.fetchall()
-        
-        panels_data = []
-        for panel_id, structured_data in rows:
-            if isinstance(structured_data, dict):
-                panel = {'panel_id': panel_id}
-                panel.update(structured_data)
-                panels_data.append(panel)
-        
-        cur.close()
+        with get_db_connection_context() as conn:
+            if not conn:
+                return []
+            cur = conn.cursor()
+            
+            # IN 절은 튜플을 사용해야 함
+            cur.execute(
+                "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id IN %s", 
+                (tuple(panel_id_list),)
+            )
+            rows = cur.fetchall()
+            
+            for panel_id, structured_data in rows:
+                if isinstance(structured_data, dict):
+                    panel = {'panel_id': panel_id}
+                    panel.update(structured_data)
+                    panels_data.append(panel)
+            
+            cur.close()
         return panels_data
     except Exception as e:
-        print(f"❌ 패널 데이터 조회 실패: {e}")
+        logging.error(f"패널 데이터 조회 실패: {e}", exc_info=True)
         return []
-    finally:
-        if conn:
-            conn.close()
