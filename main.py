@@ -86,16 +86,22 @@ class AnalysisResponse(BaseModel):
 # 🚀 [리팩토링] 공통 검색 로직 함수
 # ====================================================================
 
-async def _perform_common_search(query_text: str, search_mode: str) -> Tuple[Dict, List[str], Dict]:
+async def _perform_common_search(query_text: str, search_mode: str, mode: str) -> Tuple[Dict, List[str], Dict]:
     """
     /search와 /search-and-analyze가 공유하는 핵심 로직
     (LLM 분류, 병렬 검색, 로그 기록, 결과 포맷팅)
     
+    Args:
+        query_text (str): 검색 질의
+        search_mode (str): 검색 모드 (all/weighted/union/intersection)
+        mode (str): 실행 모드 ("lite" 또는 "pro")
+    
     Returns:
         Tuple[dict, list, dict]: (response, panel_id_list, classification)
+        - Lite 모드일 경우 response는 간소화된 딕셔너리
     """
     print(f"\n{'='*70}")
-    print(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode})")
+    print(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
     print(f"{'='*70}\n")
     
     # 1단계: LLM 키워드 분류 (캐싱 없음)
@@ -124,23 +130,61 @@ async def _perform_common_search(query_text: str, search_mode: str) -> Tuple[Dic
     log_search_query(query_text, total_count)
     
     # 4단계: 응답 구성
-    display_fields = []
-    for kw_info in classification.get('ranked_keywords', [])[:3]:
+    display_fields_raw = []
+    # 💡 [수정] max 5개 필드만 추출
+    for kw_info in classification.get('ranked_keywords', [])[:5]:
         field = kw_info.get('field', '')
         description = kw_info.get('description', '')
-        if field and description:
-            display_fields.append({
-                'field': field,
-                'label': description,
-                'priority': kw_info.get('priority', 999)
-            })
-    
+        priority = kw_info.get('priority', 999)
+        
+        # ⭐️ [수정] 복합 필드 처리: 쉼표로 분리하여 각 필드를 추가
+        fields = [f.strip() for f in field.split(',')]
+        
+        for f in fields:
+            if f:
+                # ⭐️ [추가] display_fields에는 개별 필드와 그 설명을 포함
+                display_fields_raw.append({
+                    'field': f,
+                    'label': description, # 복합 필드라도 동일한 설명 사용
+                    'priority': priority
+                })
+
+    # ⭐️ [추가] display_fields를 중복 제거 후 리스트로 변환 (프론트엔드에서 테이블 헤더로 사용)
+    # 딕셔너리를 사용하여 field를 키로 중복 제거
+    unique_display_fields_map = {}
+    for item in display_fields_raw:
+        if item['field'] not in unique_display_fields_map:
+            unique_display_fields_map[item['field']] = item
+    display_fields = list(unique_display_fields_map.values())
+
     effective_search_mode = search_mode
     if user_limit is not None and user_limit > 0:
         effective_search_mode = "quota"
 
     # 차트 분석에 사용할 panel_id_list 준비
-    panel_id_list = []
+    panel_id_list_all = search_results['final_panel_ids']
+    
+    # ⭐️ [수정] Lite 모드 응답 간소화
+    if mode == "lite":
+        lite_response = {
+            "query": query_text,
+            "classification": {
+                "ranked_keywords": classification.get('ranked_keywords', [])
+            },
+            "display_fields": display_fields,
+            "total_count": len(panel_id_list_all),
+            # Lite 모드는 테이블 데이터 조회를 위해 최대 500개만 반환
+            "final_panel_ids": panel_id_list_all[:500], 
+            "effective_search_mode": effective_search_mode
+        }
+        print(f"✅ 공통 검색 완료 (Lite 모드 간소화)")
+        # Lite 모드의 경우, panel_id_list_full 대신 간소화된 응답을 반환
+        return lite_response, panel_id_list_all, classification
+
+    # ====================================================================
+    # Pro 모드 (기존 로직 유지)
+    # ====================================================================
+    panel_id_list = [] # Pro 모드 분석에 사용할 ID 리스트
     
     if effective_search_mode == "all":
         response = {
@@ -229,10 +273,10 @@ async def _perform_common_search(query_text: str, search_mode: str) -> Tuple[Dic
             },
             "final_panel_ids": final_panel_ids[:100]
         }
-        # 분석을 위해 최대 5000개까지 사용 (기존 로직과 동일)
+        # 분석을 위해 최대 5000개까지 사용
         panel_id_list = final_panel_ids[:5000]
     
-    print(f"✅ 공통 검색 완료")
+    print(f"✅ 공통 검색 완료 (Pro 모드 전체 데이터)")
     return response, panel_id_list, classification
 
 # ====================================================================
@@ -242,8 +286,15 @@ async def _perform_common_search(query_text: str, search_mode: str) -> Tuple[Dic
 @app.post("/api/search")
 async def search_panels(search_query: SearchQuery):
     """
-    자연어 질의를 받아 하이브리드 검색 수행 (리팩토링 적용)
+    🚀 Lite 모드: 빠른 검색 (차트 분석 없이 테이블 데이터만 반환)
+    - 검색 결과 목록만 빠르게 제공
+    - 차트 데이터 생성 과정 생략으로 응답 속도 향상
+    - 최소한의 필드만 조회하여 DB 부하 감소
     """
+    print(f"\n{'='*70}")
+    print(f"🚀 [Lite 모드] 빠른 검색 시작: {search_query.query}")
+    print(f"{'='*70}\n")
+    
     valid_modes = ["all", "weighted", "union", "intersection"]
     if search_query.search_mode not in valid_modes:
         raise HTTPException(
@@ -252,18 +303,107 @@ async def search_panels(search_query: SearchQuery):
         )
     
     try:
-        # 🚀 공통 검색 함수 호출
-        response, _, _ = await _perform_common_search(
+        import time
+        start_time = time.time()
+        
+        # 🚀 공통 검색 함수 호출 (mode="lite" 전달)
+        lite_response, panel_id_list_full, classification = await _perform_common_search(
             search_query.query, 
-            search_query.search_mode
+            search_query.search_mode,
+            mode="lite" # ⭐️ mode 인자 추가
         )
         
-        return response
+        search_time = time.time() - start_time
+        print(f"⏱️  [Lite 모드] 검색 완료: {search_time:.2f}초")
+        
+        # 💡 Lite 모드: tableData만 추가 (차트 분석 생략)
+        table_data = []
+        
+        # ⭐️ [수정] final_panel_ids를 간소화된 응답에서 가져옴
+        ids_to_fetch = lite_response['final_panel_ids']
+        
+        if ids_to_fetch and len(ids_to_fetch) > 0:
+            try:
+                db_start = time.time()
+                print(f"📊 [Lite 모드] 테이블 데이터 조회 시작 (최대 {len(ids_to_fetch)}개)")
+                
+                # ✅ 최적화: display_fields만 선택적으로 조회
+                # ⭐️ [수정] display_fields는 이미 간소화된 response에 있으므로 그것을 사용
+                fields_to_fetch = [item['field'] for item in lite_response.get('display_fields', [])]
+                
+                with get_db_connection_context() as conn:
+                    if conn:
+                        cur = conn.cursor()
+                        
+                        # ✅ 최적화: 필요한 필드만 선택 (전체 조회보다 빠름)
+                        if fields_to_fetch:
+                            # ⭐️ [수정] 복합 필드 방지 로직 적용
+                            field_selects = ", ".join([
+                                f"structured_data->>'{field}' as {field}"
+                                for field in fields_to_fetch
+                            ])
+                            sql_query = f"""
+                                SELECT panel_id, {field_selects}
+                                FROM welcome_meta2
+                                WHERE panel_id = ANY(%s::text[])
+                            """
+                        else:
+                            # fallback: 전체 조회
+                            sql_query = """
+                                SELECT panel_id, structured_data
+                                FROM welcome_meta2
+                                WHERE panel_id = ANY(%s::text[])
+                            """
+                        
+                        cur.execute(sql_query, (ids_to_fetch,))
+                        results = cur.fetchall()
+                        
+                        if fields_to_fetch:
+                            # 필드 선택 모드: 검색 순서대로 테이블 데이터 생성
+                            fetched_data_map = {row[0]: {fields_to_fetch[i]: row[i+1] for i in range(len(fields_to_fetch))} for row in results}
+                            
+                            for pid in ids_to_fetch:
+                                if pid in fetched_data_map:
+                                    data = {'panel_id': pid}
+                                    data.update(fetched_data_map[pid])
+                                    table_data.append(data)
+                        else:
+                            # 전체 조회 모드: 검색 순서대로 테이블 데이터 생성
+                            fetched_data_map = {row[0]: row[1] for row in results}
+                            
+                            for pid in ids_to_fetch:
+                                if pid in fetched_data_map:
+                                    data = fetched_data_map[pid]
+                                    if isinstance(data, dict):
+                                        data['panel_id'] = pid
+                                        table_data.append(data)
+                                    else:
+                                        table_data.append({"panel_id": pid})
+                        
+                        db_time = time.time() - db_start
+                        print(f"✅ [Lite 모드] 테이블 데이터 {len(table_data)}개 조회 완료: {db_time:.2f}초")
+                                    
+            except Exception as db_e:
+                print(f"❌ [Lite 모드] Table Data 조회 실패: {db_e}")
+                import traceback
+                traceback.print_exc()
+        
+        # 💥 Lite 모드 최종 응답 구성 (간소화된 response 사용)
+        lite_response['tableData'] = table_data
+        lite_response['mode'] = "lite" 
+        
+        # ⭐️ [수정] final_panel_ids는 테이블 데이터 조회를 위해 사용되었으므로, 최종 응답에서 제거
+        del lite_response['final_panel_ids']
+        
+        total_time = time.time() - start_time
+        print(f"✅ [Lite 모드] 전체 완료: {total_time:.2f}초 - 총 {lite_response['total_count']}개 결과 중 {len(table_data)}개 테이블 데이터 반환")
+        
+        return lite_response
         
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"❌ /api/search 실패: {e}")
+        print(f"❌ [Lite 모드] /api/search 실패: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
@@ -275,8 +415,14 @@ async def search_panels(search_query: SearchQuery):
 @app.post("/api/search-and-analyze")
 async def search_and_analyze(request: AnalysisRequest):
     """
-    검색 + 분석을 한 번에 수행 (리팩토링 적용)
+    📊 Pro 모드: 검색 + 인사이트 분석 (차트 + 테이블 데이터 반환)
+    - 검색 결과에 대한 차트 시각화 제공
+    - 테이블 데이터와 분석 결과를 함께 반환
     """
+    print(f"\n{'='*70}")
+    print(f"📊 [Pro 모드] 검색 + 분석 시작: {request.query}")
+    print(f"{'='*70}\n")
+    
     valid_modes = ["all", "weighted", "union", "intersection"]
     if request.search_mode not in valid_modes:
         raise HTTPException(
@@ -285,14 +431,15 @@ async def search_and_analyze(request: AnalysisRequest):
         )
     
     try:
-        # 🚀 1. 공통 검색 함수 호출
+        # 🚀 1. 공통 검색 함수 호출 (mode="pro" 전달)
         response, panel_id_list, classification = await _perform_common_search(
             request.query, 
-            request.search_mode
+            request.search_mode,
+            mode="pro" # ⭐️ mode 인자 추가
         )
         
-        # 🚀 2. [고유 로직] 차트 데이터 생성 (DB 집계 쿼리 사용)
-        print("\n📌 5단계: 차트 데이터 생성 (최적화)")
+        # 🚀 2. [Pro 모드 고유] 차트 데이터 생성 (DB 집계 쿼리 사용)
+        print("\n📊 [Pro 모드] 차트 데이터 생성 시작")
         analysis_result, status_code = analyze_search_results(
             request.query,
             classification,
@@ -302,21 +449,20 @@ async def search_and_analyze(request: AnalysisRequest):
         if status_code == 200:
             response['charts'] = analysis_result.get('charts', [])
             response['analysis_summary'] = analysis_result.get('main_summary', '')
-            print(f"✅ 차트 {len(response['charts'])}개 생성 완료")
+            print(f"✅ [Pro 모드] 차트 {len(response['charts'])}개 생성 완료")
         else:
             response['charts'] = []
             response['analysis_summary'] = '차트 생성 실패'
-            print(f"⚠️  차트 생성 실패")
+            print(f"⚠️  [Pro 모드] 차트 생성 실패")
         
         # ===============================================================
-        # 💥 [신규 로직] Table Data 생성을 위해 DB 조회
+        # 💥 [Pro 모드] Table Data 생성을 위해 DB 조회
         # ===============================================================
-        print(f"\n📌 6단계: Table Data 생성 (패널 {len(panel_id_list)}개 대상)")
+        print(f"\n📊 [Pro 모드] Table Data 생성 시작 (패널 {len(panel_id_list)}개 대상)")
         table_data = []
         
         # 프론트엔드가 페이지네이션으로 100개만 보여주므로,
         # DB 부하 및 네트워크 효율성을 위해 상위 100개만 조회합니다.
-        # panel_id_list는 검색 결과의 모든 ID (최대 5000개)를 포함할 수 있습니다.
         # response['final_panel_ids']는 이미 100개로 잘려있으므로 그것을 사용합니다.
         ids_to_fetch = response['final_panel_ids']
         
@@ -351,21 +497,22 @@ async def search_and_analyze(request: AnalysisRequest):
                                     table_data.append({"panel_id": pid})
                                     
             except Exception as db_e:
-                print(f"❌ Table Data 조회 실패: {db_e}")
+                print(f"❌ [Pro 모드] Table Data 조회 실패: {db_e}")
                 # 실패해도 차트 결과는 반환하도록 table_data는 비워둠
         
-        # 💥 최종 응답에 tableData 추가
+        # 💥 최종 응답에 tableData와 mode 추가
         response['tableData'] = table_data
+        response['mode'] = 'pro'  # 응답 모드 명시
         
-        print(f"✅ 차트 {len(response['charts'])}개, 테이블 데이터 {len(table_data)}개 생성 완료")
-        print(f"\n✅ 검색+분석 완료")
+        print(f"✅ [Pro 모드] 차트 {len(response['charts'])}개, 테이블 데이터 {len(table_data)}개 생성 완료")
+        print(f"\n✅ [Pro 모드] 검색+분석 완료")
         
         return response
         
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(f"❌ /api/search-and-analyze 실패: {e}")
+        print(f"❌ [Pro 모드] /api/search-and-analyze 실패: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")

@@ -108,7 +108,7 @@ def hybrid_search_parallel(
         # 결과 수집
         for key, future in futures.items():
             try:
-                result = future.result(timeout=10)
+                result = future.result(timeout=30)
                 if key == 'subjective':
                     panel_id2 = result
                     print(f"   ✅ Welcome 주관식 완료: {len(panel_id2):,}명")
