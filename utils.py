@@ -164,14 +164,22 @@ def get_panels_data_from_db(panel_id_list: List[str]) -> List[Dict]:
             if not conn:
                 return []
             cur = conn.cursor()
-            
-            # IN 절은 튜플을 사용해야 함
+
             cur.execute(
-                "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id IN %s", 
-                (tuple(panel_id_list),)
+                """
+                WITH id_order (panel_id, ordering) AS (
+                    SELECT * FROM unnest(%s::text[], %s::int[])
+                )
+                SELECT t.panel_id, t.structured_data
+                FROM welcome_meta2 t
+                JOIN id_order o ON t.panel_id = o.panel_id
+                ORDER BY o.ordering;
+                """,
+                (panel_id_list, list(range(len(panel_id_list))))
             )
             rows = cur.fetchall()
             
+            # 정렬된 결과를 순서대로 추가
             for panel_id, structured_data in rows:
                 if isinstance(structured_data, dict):
                     panel = {'panel_id': panel_id}

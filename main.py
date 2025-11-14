@@ -2,6 +2,7 @@ import os
 import json
 import time
 import asyncio
+loop = asyncio.get_running_loop()
 import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -52,6 +53,12 @@ def preload_models():
     logging.info("🔄 모든 AI 모델을 미리 로드합니다...")
     initialize_embeddings()
     classify_query_keywords("모델 로딩 테스트")
+    try:
+        classify_query_keywords("모델 로딩 테스트")
+        logging.info("✅ Claude (LLM) 모델 연결 확인 완료.")
+    except Exception as e:
+        logging.warning(f"⚠️  Claude (LLM) 모델 연결 테스트 실패: {e}")
+        logging.warning("   LLM 기능이 작동하지 않을 수 있지만, 서버는 계속 시작합니다.")
     logging.info("✅ 모든 AI 모델 로드 완료")
     logging.info("="*70)
 
@@ -194,15 +201,15 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     
     # 1. LLM 키워드 분류
     classification = classify_query_keywords(query_text)
+    logging.info(f"🤖 LLM 분류 결과: {classification}")
     user_limit = classification.get('limit')
     effective_search_mode = "quota" if user_limit and user_limit > 0 else search_mode
     logging.info(f"💡 API: 감지된 Limit 값: {user_limit}")
-    
-    # 2. 하이브리드 검색 수행 (병렬 처리)
+
     search_results = hybrid_search(
-        classification, 
-        search_mode=search_mode,
-        limit=user_limit
+        classification,
+        search_mode,
+        user_limit
     )
     
     # 3. 검색 로그 기록

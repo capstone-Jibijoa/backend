@@ -2,14 +2,16 @@ import os
 import re
 import time
 import logging
-from typing import Optional, Tuple, List, Set
+from typing import Optional, Tuple, List, Set, Dict
 import threading
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from qdrant_client.http.models import Filter, FieldCondition, MatchAny
 
 from db import get_qdrant_client 
 from search_helpers import (
-    initialize_embeddings, embedding_lock,
+    initialize_embeddings,
+    build_welcome_query_conditions,
     search_welcome_objective, search_welcome_subjective, search_qpoll
 )
 
@@ -18,7 +20,8 @@ load_dotenv()
 def hybrid_search_parallel(
     classified_keywords: dict, 
     search_mode: str = "all", 
-    limit: Optional[int] = None
+    limit: Optional[int] = None,
+    is_comparison: bool = False # [신규] 비교 그룹 검색 플래그
 ) -> dict:
     """
     하이브리드 검색 (병렬 실행)
@@ -28,13 +31,25 @@ def hybrid_search_parallel(
     welcome_subj_keywords = classified_keywords.get('welcome_keywords', {}).get('subjective', [])
     qpoll_data = classified_keywords.get('qpoll_keywords', {})
     
+    # 쿼리 복잡도에 따른 동적 임계값 설정
+    def _get_dynamic_threshold(objective_keywords: List[str]) -> int:
+        num_keywords = len(objective_keywords)
+        if num_keywords <= 1:
+            # 광범위한 쿼리 (e.g., "20대") -> 높은 임계값
+            return 1000
+        elif num_keywords <= 3:
+            # 일반적인 쿼리 (e.g., "서울 30대 남성") -> 기본 임계값
+            return 500
+        else:
+            # 매우 구체적인 쿼리 (e.g., "서울 30대 남성 사무직") -> 낮은 임계값
+            return 200
+
+    TWO_STAGE_THRESHOLD = _get_dynamic_threshold(welcome_obj_keywords)
+    logging.info(f"   ⚙️  동적 임계값 설정: {TWO_STAGE_THRESHOLD} (객관식 키워드 수: {len(welcome_obj_keywords)})")
+    two_stage_used = False
+
     logging.info("📌 2단계: 하이브리드 검색 (병렬 실행)")
     start_time = time.time()
-    
-    # 1. 객관식 검색
-    logging.info("   🔄 Welcome 객관식 검색...")
-    panel_id1 = search_welcome_objective(welcome_obj_keywords)
-    logging.info(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명")
     
     # 2. Qdrant 클라이언트를 메인 스레드에서 *한 번만* 생성
     qdrant_client = None
@@ -44,74 +59,129 @@ def hybrid_search_parallel(
             logging.error("   ❌ Qdrant 클라이언트 생성 실패. 벡터 검색 중단.")
     except Exception as e:
         logging.error(f"   ❌ Qdrant 클라이언트 생성 중 오류: {e}", exc_info=True)
-
+    
     # 3. 임베딩 미리 수행 (Lock 사용)
     subjective_vector = None
     qpoll_vector = None
     embeddings = None
     
-    with embedding_lock:
-        try:
-            embeddings = initialize_embeddings() 
-            if welcome_subj_keywords:
-                def flatten(items):
-                    flat = []
-                    for item in items:
-                        if isinstance(item, list): flat.extend(flatten(item))
-                        elif item is not None: flat.append(str(item))
-                    return flat
-                subj_query_text = " ".join(flatten(welcome_subj_keywords))
-                if subj_query_text:
-                    subjective_vector = embeddings.embed_query(subj_query_text)
-            
-            qpoll_keywords = qpoll_data.get('keywords')
-            if qpoll_keywords:
-                qpoll_query_text = " ".join(qpoll_keywords)
-                if qpoll_query_text:
-                    qpoll_vector = embeddings.embed_query(qpoll_query_text)
-        except Exception as e:
-            logging.error(f"   ❌ 임베딩 생성 중 오류: {e}", exc_info=True)
+    try:
+        embeddings = initialize_embeddings()
+        
+        def flatten(items):
+            flat = []
+            for item in items:
+                if isinstance(item, list): flat.extend(flatten(item))
+                elif item is not None: flat.append(str(item))
+            return flat
+        
+        # Subjective 벡터 생성 
+        if welcome_subj_keywords:
+            expansion_keywords = classified_keywords.get('welcome_keywords', {}).get('subjective_expansion', [])
+            combined_keywords = welcome_subj_keywords + expansion_keywords
+            subj_query_text = " ".join(flatten(combined_keywords))
+            if subj_query_text:
+                subjective_vector = embeddings.embed_query(subj_query_text)
+    
+        # QPoll 벡터 생성 
+        qpoll_keywords = qpoll_data.get('keywords')
+        if qpoll_keywords:
+            qpoll_query_text = " ".join(qpoll_keywords)
+            if qpoll_query_text:
+                qpoll_vector = embeddings.embed_query(qpoll_query_text)
+    except Exception as e:
+        logging.error(f"   ❌ 임베딩 생성 중 오류: {e}", exc_info=True)
 
-    # 4. 네트워크 I/O 작업만 병렬 실행 (클라이언트 전달)
+    # 4. [수정] 모든 DB/네트워크 I/O 작업을 병렬로 실행
+    panel_id1 = set()
     panel_id2 = set()
     panel_id3 = set()
     
-    # qdrant_client가 성공적으로 생성되었을 때만 실행
-    if qdrant_client:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {}
-            
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        
+        # 작업 1: 객관식 검색
+        if welcome_obj_keywords:
+            logging.info("   ⚡ Welcome 객관식 검색 스레드 시작...")
+            futures['objective'] = executor.submit(search_welcome_objective, welcome_obj_keywords)
+
+        # 작업 2 & 3: 벡터 검색 (임베딩이 성공했을 경우)
+        if qdrant_client:
+            vector_search_filter = None # [수정] 변수를 바깥 스코프에서 미리 초기화
+            # 객관식 검색이 끝날 때까지 기다렸다가 2단계 전략 결정
+            if 'objective' in futures:
+                try:
+                    # 객관식 결과 먼저 받아오기
+                    panel_id1, unhandled_obj_keywords = futures['objective'].result(timeout=60)
+                    logging.info(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명")
+                    
+                    if unhandled_obj_keywords:
+                        logging.warning(f"   ⚠️  객관식 키워드 일부가 벡터 검색으로 전환됩니다: {unhandled_obj_keywords}")
+                        welcome_subj_keywords.extend(list(unhandled_obj_keywords))
+                        welcome_subj_keywords = list(dict.fromkeys(welcome_subj_keywords))
+                        # 재실행 필요 시, 벡터 재생성 (캐싱되어 있다면 비용 적음)
+                        if unhandled_obj_keywords and embeddings:
+                             subj_query_text = " ".join(welcome_subj_keywords)
+                             subjective_vector = embeddings.embed_query(subj_query_text)
+
+                except Exception as e:
+                    logging.error(f"   ❌ 객관식 검색 스레드 실패: {e}", exc_info=True)
+                    panel_id1 = set() # 실패 시 빈 결과로 처리
+                
+                # 2단계 검색 전략 결정
+                if len(panel_id1) >= TWO_STAGE_THRESHOLD:
+                    logging.info(f"   ✨ 1단계 전략: 객관식 결과({len(panel_id1)}명)가 충분하여, 이 ID를 필터로 벡터 검색 실행")
+                    vector_search_filter = Filter(must=[FieldCondition(key="panel_id", match=MatchAny(any=list(panel_id1)))])
+                    two_stage_used = True
+
             if subjective_vector:
-                logging.info("   ⚡ Welcome 주관식 시작 (Top-K)")
-                futures['subjective'] = executor.submit(
-                    search_welcome_subjective, 
-                    query_vector=subjective_vector,
-                    qdrant_client=qdrant_client, 
-                    keywords=welcome_subj_keywords
-                )
+                logging.info("   ⚡ Welcome 주관식 검색 스레드 시작 (Top-K)")
+                subjective_filter = None
+                if vector_search_filter:
+                    subjective_filter = Filter(must=[FieldCondition(key="metadata.panel_id", match=MatchAny(any=list(panel_id1)))])
+                
+                if any(kw in subj_query_text for kw in ['직무', '직업', '업무']):
+                    logging.info("   -&gt; '직무' 관련 검색으로 '무직'/'학생' 제외 필터 활성화")
+  
+                    existing_must_conditions = subjective_filter.must if subjective_filter and subjective_filter.must else []
+                    job_must_not_conditions = [
+                        FieldCondition(key="metadata.job_title_raw", match={"any": ["무직", "학생", "대학생", "대학원생"]})
+                    ]
+
+                    subjective_filter = Filter(must=existing_must_conditions, must_not=job_must_not_conditions)
+                futures['subjective'] = executor.submit(search_welcome_subjective, subjective_vector, qdrant_client, combined_keywords, subjective_filter)
             
             if qpoll_vector:
-                logging.info("   ⚡ QPoll 시작 (Top-K)")
-                futures['qpoll'] = executor.submit(
-                    search_qpoll,
-                    query_vector=qpoll_vector,
-                    qdrant_client=qdrant_client, 
-                    keywords=qpoll_keywords
-                )
-            
-            for key, future in futures.items():
-                try:
-                    result = future.result(timeout=60)
-                    if key == 'subjective': panel_id2 = result; logging.info(f"   ✅ Welcome 주관식 완료: {len(panel_id2):,}명")
-                    elif key == 'qpoll': panel_id3 = result; logging.info(f"   ✅ QPoll 완료: {len(panel_id3):,}명")
-                except Exception as e:
-                    if isinstance(e, TimeoutError): logging.error(f"   ❌ {key} 검색 시간 초과", exc_info=False)
-                    logging.error(f"   ❌ {key} 검색 실패: {e}", exc_info=True)
-                    if key == 'subjective': panel_id2 = set()
-                    elif key == 'qpoll': panel_id3 = set()
+                logging.info("   ⚡ QPoll 검색 스레드 시작 (Top-K)")
+                futures['qpoll'] = executor.submit(search_qpoll, qpoll_vector, qdrant_client, qpoll_data.get('keywords'), vector_search_filter)
+
+        # 나머지 결과 취합
+        if 'subjective' in futures:
+            try:
+                panel_id2 = futures['subjective'].result(timeout=60)
+                logging.info(f"   ✅ Welcome 주관식 완료: {len(panel_id2):,}명")
+            except Exception as e:
+                logging.error(f"   ❌ 주관식 검색 스레드 실패: {e}", exc_info=True)
+                panel_id2 = set()
+        
+        if 'qpoll' in futures:
+            try:
+                panel_id3 = futures['qpoll'].result(timeout=60)
+                logging.info(f"   ✅ QPoll 완료: {len(panel_id3):,}명")
+            except Exception as e:
+                logging.error(f"   ❌ QPoll 검색 스레드 실패: {e}", exc_info=True)
+                panel_id3 = set()
     
     elapsed = time.time() - start_time
     logging.info(f"⚡ 병렬 검색 완료: {elapsed:.2f}초")
+
+    # [신규] 2단계 검색 후처리: 객관식 결과가 부족했을 때, 벡터 검색 결과에 객관식 필터링 적용
+    if welcome_obj_keywords and not two_stage_used and panel_id1:
+        logging.info(f"   ✨ 2단계 전략: 객관식 결과({len(panel_id1)}명)가 부족하여, 벡터 검색 결과에 객관식 필터 적용")
+        panel_id2 = panel_id2.intersection(panel_id1) if panel_id1 else panel_id2
+        panel_id3 = panel_id3.intersection(panel_id1) if panel_id1 else panel_id3
+        two_stage_used = True
+        logging.info(f"   -> 필터 후: Welcome(Subj)={len(panel_id2):,}, QPoll={len(panel_id3):,}")
 
     # 5. 결과 통합 
     all_sets = [s for s in [panel_id1, panel_id2, panel_id3] if s]
@@ -133,16 +203,37 @@ def hybrid_search_parallel(
     union_panel_ids = sorted(union_set, key=lambda x: union_scores[x], reverse=True)
     results['union'] = { 'panel_ids': union_panel_ids, 'count': len(union_panel_ids), 'scores': union_scores }
     
-    weights = {'panel_id1': 0.4, 'panel_id2': 0.3, 'panel_id3': 0.3}
+    def _get_dynamic_weights(classification: Dict) -> Dict[str, float]:
+        """쿼리 특성에 따라 동적으로 가중치를 계산합니다."""
+        obj_kws = classification.get('welcome_keywords', {}).get('objective', [])
+        subj_kws = classification.get('welcome_keywords', {}).get('subjective', [])
+        qpoll_kws = classification.get('qpoll_keywords', {}).get('keywords', [])
+
+        # 각 검색 소스의 기본 중요도 점수
+        scores = {
+            'panel_id1': 1.5 if obj_kws else 0.0,      # 객관식은 중요하므로 높은 기본 점수
+            'panel_id2': 1.0 if subj_kws else 0.0,      # 주관식은 일반 점수
+            'panel_id3': 1.2 if qpoll_kws else 0.0       # QPoll은 특정 행동/의견이므로 약간 더 중요
+        }
+        
+        total_score = sum(scores.values())
+        
+        if total_score == 0:
+            return {'panel_id1': 0.33, 'panel_id2': 0.33, 'panel_id3': 0.34} # 모든 키워드가 없는 경우
+
+        # 점수를 정규화하여 총합이 1이 되도록 가중치 계산
+        weights = {k: round(v / total_score, 2) for k, v in scores.items()}
+        return weights
+
+    weights = _get_dynamic_weights(classified_keywords)
+    logging.info(f"   ⚖️  동적 가중치 적용: {weights}")
+
     weighted_panel_ids = []
     weighted_scores = {}
     if union_set:
-        for panel_id in union_set:
-            score = 0.0
-            if panel_id in panel_id1: score += weights['panel_id1']
-            if panel_id in panel_id2: score += weights['panel_id2']
-            if panel_id in panel_id3: score += weights['panel_id3']
-            if score > 0: weighted_scores[panel_id] = score
+        weighted_scores = {pid: (weights['panel_id1'] if pid in panel_id1 else 0) + 
+                                (weights['panel_id2'] if pid in panel_id2 else 0) + 
+                                (weights['panel_id3'] if pid in panel_id3 else 0) for pid in union_set}
         weighted_panel_ids = sorted(weighted_scores.keys(), key=lambda x: weighted_scores[x], reverse=True)
     
     results['weighted'] = { 'panel_ids': weighted_panel_ids, 'count': len(weighted_panel_ids), 'scores': weighted_scores, 'weights': weights }
@@ -182,5 +273,5 @@ def hybrid_search_parallel(
     return {
         "panel_id1": panel_id1, "panel_id2": panel_id2, "panel_id3": panel_id3,
         "final_panel_ids": final_panel_ids, "match_scores": match_scores,
-        "results": results, "two_stage_used": False
+        "results": results, "two_stage_used": two_stage_used
     }

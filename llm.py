@@ -5,6 +5,7 @@ import hashlib
 import logging
 from dotenv import load_dotenv
 from datetime import datetime
+from functools import lru_cache
 from fastapi import HTTPException
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -18,7 +19,7 @@ except Exception as e:
     CLAUDE_CLIENT = None
     logging.error(f"Anthropic 클라이언트 생성 실패: {e}")
 
-
+@lru_cache(maxsize=128)
 def classify_query_keywords(query: str) -> dict:
     """
     쿼리를 키워드로 분류 (LLM 직접 호출)
@@ -27,78 +28,56 @@ def classify_query_keywords(query: str) -> dict:
         raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
     system_prompt = """
-사용자 쿼리를 분석하여 핵심 키워드를 추출하고 분류하는 전문가입니다.
+당신은 사용자 쿼리를 분석하고 DB 검색 키워드로 분류하는 전문가입니다.
 
-## 분류 기준
-**objective (구조화 필터)**: 넓은 그룹 분류 (예: 지역, 연령대, 성별, 직업군)
-**subjective (벡터 검색)**: 구체적 특성 (예: 브랜드명, 세부 직무, 기술, 구체적 취향)
-**qpoll_keywords (설문 응답 검색)**: 3단계 구조 (카테고리, 브랜드, 행동)
+분류 기준
+1. objective (구조화 필터 / 1순위)
+PostgreSQL로 필터링 가능한 명확한 카테고리.
+예: 지역 (서울, 경기), 연령대 (20대), 성별 (남성), 직업군 (직장인, 학생)
+
+2. qpoll_keywords (설문 벡터 / 2순위)
+1번에 해당하지 않지만, 사용자의 경험/행동/구독/의견과 관련된 키워드.
+예: "OTT", "넷플릭스", "가성비", "영상 구독"
+
+3. subjective (주관식 벡터 / 3순위)
+1, 2번에 해당하지 않는 모든 세부 키워드. (속도 튜닝됨)
+예: "IT", "아이폰", "창의적인", "예술가", "환경을 생각하는"
 
 ## 판단 로직
 "10개 이상 큰 그룹으로 나눌 수 있는가?"
 → YES: objective (예: 직장인, 30대, 서울)
 → NO: subjective (예: 삼성, 커피, BMW)
 
-## 출력 (순수 JSON만)
-```json
-{
- "welcome_keywords": {
-  "objective": ["카테고리1", "카테고리2"],
-  "subjective": ["특징1", "특징2"]
- },
- "qpoll_keywords": {
-  "survey_type": "주제 또는 null",
-  "keywords": ["키워드1", "키워드2"]
- },
- "ranked_keywords_raw": ["키워드1", "키워드2", "키워드3"]
-}
-
-## 예시
-
-쿼리: "서울 30대 IT 직장인 100명"
-```json
+출력 (순수 JSON만)
 {
   "welcome_keywords": {
-    "objective": ["서울", "30대", "직장인"],
-    "subjective": ["IT"]
+    "objective": ["카테고리1", "카테고리2"],
+    "subjective": ["특징1", "특징2"],
+    "subjective_expansion": ["연관키워드1", "연관키워드2"]
   },
   "qpoll_keywords": {
-    "survey_type": null,
-    "keywords": []
+    "survey_type": "주제 또는 null",
+    "keywords": ["키워드1", "키워드2"]
   },
-  "ranked_keywords_raw": ["서울", "30대", "IT"]
+  "ranked_keywords_raw": ["키워드1", "키워드2", "키워드3"]
 }
-```
 
-쿼리: "부산 40대 삼성폰 쓰는 고소득자 50명"
-```json
+예시 
+쿼리: "서울 30대 삼성폰 사용자 중 가성비를 중요하게 생각하는 마케팅 직무 100명"
 {
   "welcome_keywords": {
-    "objective": ["부산", "40대", "고소득자"],
-    "subjective": ["삼성폰"]
+    "objective": ["서울", "30대"],
+    "subjective": ["삼성폰 사용자", "마케팅 직무"],
+    "subjective_expansion": ["갤럭시", "마케터", "광고", "홍보"]
   },
   "qpoll_keywords": {
-    "survey_type": "전자기기",
-    "keywords": ["스마트폰", "핸드폰", "삼성", "갤럭시", "사용"]
+    "survey_type": "가치관/경제",
+    "keywords": ["가성비", "가심비", "가격 민감도", "비용 효율"]
   },
-  "ranked_keywords_raw": ["부산", "40대", "고소득자"]
+  "ranked_keywords_raw": ["서울", "30대", "삼성폰", "가성비", "마케팅 직무"],
+  "limit": 100
 }
-```
 
-쿼리: "서울 OTT 사용하는 40~50대 남성" 
-```json
-{
-  "welcome_keywords": {
-    "objective": ["서울", "40~50대", "남성"],
-    "subjective": ["OTT"]
-  },
-  "qpoll_keywords": {
-    "survey_type": "엔터테인먼트",
-    "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
-  },
-  "ranked_keywords_raw": ["서울", "40~50대", "남성"]
-}
-```
 사용자 쿼리:
 <query>
 {{QUERY}}
