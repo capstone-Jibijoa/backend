@@ -169,7 +169,8 @@ def get_qdrant_client():
     try:
         client = QdrantClient(
             host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6333))
+            port=int(os.getenv("QDRANT_PORT", 6333)),
+            timeout=20.0      # 🔥 Timeout 설정 (기본 5초 → 20초로 증가)
         )
         print("✅ Qdrant 클라이언트 연결 성공")
         return client

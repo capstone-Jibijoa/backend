@@ -7,6 +7,7 @@ import os
 import re
 import time
 from typing import Optional, Tuple, List, Set
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,10 +20,12 @@ from search_logic import (
     EMBEDDINGS, CURRENT_YEAR, CATEGORY_MAPPING, VALID_REGIONS,
     expand_keywords, initialize_embeddings, extract_panel_id_from_payload,
     ConditionBuilder, search_welcome_objective, search_welcome_subjective,
-    search_qpoll, search_welcome_two_stage
+    search_qpoll
 )
 
 load_dotenv()
+
+embedding_lock = threading.Lock()
 
 
 def hybrid_search_parallel(
@@ -58,55 +61,55 @@ def hybrid_search_parallel(
     start_time = time.time()
     
     # 병렬 실행
-    panel_id1 = set()
+    # ⭐️ 1. [수정] 객관식 검색(필터 셋)을 *먼저* 실행
+    print(f"   🔄 Welcome 객관식 검색 (필터 셋 생성)...")
+    panel_id1 = search_welcome_objective(welcome_obj_keywords)
+    print(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명 (필터 셋)")
+    
+    # ⭐️ 2. [수정] 주관식/QPoll을 병렬 실행 (필터 셋 전달)
     panel_id2 = set()
     panel_id3 = set()
     
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {}
         
-        if use_two_stage:
-            # 2단계 검색은 병렬 불가 (의존 관계)
-            print(f"   🔄 2단계 검색 실행 (순차)")
-            panel_id1 = search_welcome_two_stage(
-                objective_keywords=welcome_obj_keywords,
-                subjective_keywords=welcome_subj_keywords
-            )
-            panel_id2 = set()
-        else:
-            # Welcome 객관식 (병렬)
-            if welcome_obj_keywords:
-                print(f"   ⚡ Welcome 객관식 시작")
-                futures['objective'] = executor.submit(
-                    search_welcome_objective, 
-                    welcome_obj_keywords
-                )
+        # Welcome 주관식 (병렬)
+        if welcome_subj_keywords:
+            print(f"   ⚡ Welcome 주관식 시작 (필터 적용)")
             
-            # Welcome 주관식 (병렬)
-            if welcome_subj_keywords:
-                print(f"   ⚡ Welcome 주관식 시작")
-                futures['subjective'] = executor.submit(
-                    search_welcome_subjective, 
-                    welcome_subj_keywords
-                )
-        
-        # QPoll (항상 병렬 가능)
-        if qpoll_data.get('keywords'):
-            print(f"   ⚡ QPoll 시작")
-            futures['qpoll'] = executor.submit(
-                search_qpoll,
-                qpoll_data.get('survey_type'),
-                qpoll_data.get('keywords')
+            def subjective_search_with_lock(*args, **kwargs):
+                with embedding_lock:
+                    print("   (Lock 획득: Welcome 주관식)")
+                    return search_welcome_subjective(*args, **kwargs)
+
+            futures['subjective'] = executor.submit(
+                subjective_search_with_lock, 
+                welcome_subj_keywords,
+                pre_filter_panel_ids=panel_id1  # ⭐️ 필터 전달
             )
         
-        # 결과 수집 (타임아웃 10초)
+        # QPoll (병렬)
+        qpoll_keywords = qpoll_data.get('keywords')
+        if qpoll_keywords:
+            print(f"   ⚡ QPoll 시작 (필터 적용)")
+
+            def qpoll_search_with_lock(*args, **kwargs):
+                with embedding_lock:
+                    print("   (Lock 획득: QPoll)")
+                    return search_qpoll(*args, **kwargs)
+
+            futures['qpoll'] = executor.submit(
+                qpoll_search_with_lock,
+                qpoll_data.get('survey_type'),
+                qpoll_keywords,
+                pre_filter_panel_ids=panel_id1  # ⭐️ 필터 전달
+            )
+        
+        # 결과 수집
         for key, future in futures.items():
             try:
-                result = future.result(timeout=10)
-                if key == 'objective':
-                    panel_id1 = result
-                    print(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명")
-                elif key == 'subjective':
+                result = future.result(timeout=30)
+                if key == 'subjective':
                     panel_id2 = result
                     print(f"   ✅ Welcome 주관식 완료: {len(panel_id2):,}명")
                 elif key == 'qpoll':
@@ -114,9 +117,7 @@ def hybrid_search_parallel(
                     print(f"   ✅ QPoll 완료: {len(panel_id3):,}명")
             except Exception as e:
                 print(f"   ❌ {key} 검색 실패: {e}")
-                if key == 'objective':
-                    panel_id1 = set()
-                elif key == 'subjective':
+                if key == 'subjective':
                     panel_id2 = set()
                 elif key == 'qpoll':
                     panel_id3 = set()
@@ -124,9 +125,9 @@ def hybrid_search_parallel(
     elapsed = time.time() - start_time
     print(f"\n⚡ 병렬 검색 완료: {elapsed:.2f}초\n")
     
-    # 결과 통합 (기존 로직)
-    all_sets = [s for s in [panel_id1, panel_id2, panel_id3] if s]
+    # ⭐️ 3. [수정] 결과 통합 (위 3단계와 동일한 로직)
     
+    all_sets = [s for s in [panel_id1, panel_id2, panel_id3] if s]
     results = {}
     
     # 교집합
@@ -168,14 +169,11 @@ def hybrid_search_parallel(
     # 가중치
     weights = {'panel_id1': 0.4, 'panel_id2': 0.3, 'panel_id3': 0.3}
     
-    if not all_sets:
-        weighted_panel_ids = []
-        weighted_scores = {}
-    else:
-        all_panel_ids = set.union(*all_sets)
-        weighted_scores = {}
+    weighted_panel_ids = []
+    weighted_scores = {}
+    if union_set: # 객관식 결과가 있을 때만 가중치 계산
         
-        for panel_id in all_panel_ids:
+        for panel_id in union_set:
             score = 0.0
             if panel_id in panel_id1:
                 score += weights['panel_id1']
@@ -183,7 +181,8 @@ def hybrid_search_parallel(
                 score += weights['panel_id2']
             if panel_id in panel_id3:
                 score += weights['panel_id3']
-            weighted_scores[panel_id] = score
+            if score > 0: 
+                weighted_scores[panel_id] = score
         
         weighted_panel_ids = sorted(
             weighted_scores.keys(), 
@@ -202,11 +201,8 @@ def hybrid_search_parallel(
     print(f"{'='*70}")
     print(f"📊 검색 결과 요약")
     print(f"{'='*70}")
-    if use_two_stage:
-        print(f"Welcome 2단계: {len(panel_id1):,}명")
-    else:
-        print(f"Welcome 객관식: {len(panel_id1):,}명")
-        print(f"Welcome 주관식: {len(panel_id2):,}명")
+    print(f"Welcome 객관식: {len(panel_id1):,}명")
+    print(f"Welcome 주관식: {len(panel_id2):,}명")
     print(f"QPoll: {len(panel_id3):,}명")
     print(f"")
     print(f"교집합: {results['intersection']['count']:,}명")
@@ -277,7 +273,7 @@ def hybrid_search_parallel(
         "final_panel_ids": final_panel_ids,
         "match_scores": match_scores,
         "results": results,
-        "two_stage_used": use_two_stage
+        "two_stage_used": False
     }
 
 
@@ -351,75 +347,3 @@ def hybrid_search_with_cache(
         print(f"⚠️  캐싱 실패: {e}")
     
     return result
-
-
-# =======================================================
-# 성능 테스트 함수
-# =======================================================
-
-def benchmark_search(query: str, iterations: int = 3):
-    """
-    검색 성능 벤치마크
-    
-    Args:
-        query: 테스트 쿼리
-        iterations: 반복 횟수
-    
-    예시:
-        benchmark_search("서울 30대 IT 직장인 100명")
-    """
-    from hybrid_logic_optimized import classify_query_keywords
-    
-    print(f"\n{'='*70}")
-    print(f"🧪 검색 성능 벤치마크")
-    print(f"   쿼리: {query}")
-    print(f"   반복: {iterations}회")
-    print(f"{'='*70}\n")
-    
-    # LLM 분류
-    print("📌 1단계: LLM 분류")
-    classification = classify_query_keywords(query)
-    
-    # 순차 검색 벤치마크
-    print("\n📌 2단계: 순차 검색 테스트")
-    from search_logic import hybrid_search
-    
-    sequential_times = []
-    for i in range(iterations):
-        start = time.time()
-        result_seq = hybrid_search(classification, "weighted")
-        elapsed = time.time() - start
-        sequential_times.append(elapsed)
-        print(f"   시도 {i+1}: {elapsed:.2f}초")
-    
-    avg_seq = sum(sequential_times) / len(sequential_times)
-    print(f"   평균: {avg_seq:.2f}초")
-    
-    # 병렬 검색 벤치마크
-    print("\n📌 3단계: 병렬 검색 테스트")
-    
-    parallel_times = []
-    for i in range(iterations):
-        start = time.time()
-        result_par = hybrid_search_parallel(classification, "weighted")
-        elapsed = time.time() - start
-        parallel_times.append(elapsed)
-        print(f"   시도 {i+1}: {elapsed:.2f}초")
-    
-    avg_par = sum(parallel_times) / len(parallel_times)
-    print(f"   평균: {avg_par:.2f}초")
-    
-    # 결과 비교
-    print(f"\n{'='*70}")
-    print(f"📊 성능 비교")
-    print(f"{'='*70}")
-    print(f"순차 검색: {avg_seq:.2f}초")
-    print(f"병렬 검색: {avg_par:.2f}초")
-    improvement = ((avg_seq - avg_par) / avg_seq) * 100
-    print(f"개선율: {improvement:.1f}%")
-    print(f"{'='*70}\n")
-
-
-if __name__ == "__main__":
-    # 테스트 실행
-    benchmark_search("서울 30대 IT 직장인 100명", iterations=3)

@@ -2,16 +2,19 @@ import os
 import re
 from typing import Optional, Tuple, List, Set
 from datetime import datetime
+import threading
 from dotenv import load_dotenv
-from db_logic import get_db_connection, get_qdrant_client
+from db_logic_optimized import get_db_connection_context, get_qdrant_client, get_db_connection, return_db_connection
 from qdrant_client.models import Filter, FieldCondition, MatchAny
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 
 EMBEDDINGS = None
+embedding_lock = threading.Lock()
 CURRENT_YEAR = datetime.now().year
 
+# ✅ [개선] 연령대 매핑 추가
 CATEGORY_MAPPING = {
     '직장인': ['사무직', '전문직', '경영관리직', '생산노무직', '서비스직', '판매직', '기술직'],
     '고소득': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
@@ -19,6 +22,16 @@ CATEGORY_MAPPING = {
     '중산층': ['월 300~399만원', '월 400~499만원'],
     '고학력': ['대학교 졸업', '대학원 재학 이상'],
     '저학력': ['고등학교 졸업 이하', '중학교 졸업 이하'],
+    # ✅ 연령대 매핑 추가
+    '젊은층': ['20대', '30대'],
+    '청년': ['20대', '30대'],
+    'MZ세대': ['20대', '30대'],
+    '중장년층': ['40대', '50대'],
+    'X세대': ['40대', '50대'],
+    '장년층': ['50대', '60대'],
+    '베이비부머': ['50대', '60대 이상'],
+    '노년층': ['60대 이상'],
+    '청소년': ['10대'],
 }
 
 VALID_REGIONS = [
@@ -39,13 +52,19 @@ def expand_keywords(keywords: List[str]) -> List[str]:
 
 
 def initialize_embeddings():
-    """KURE 임베딩 모델 초기화"""
+    """KURE 임베딩 모델 초기화 (스레드 안전하게 수정)"""
     global EMBEDDINGS
+
+    # ⭐️ [수정] 모델이 이미 로드된 경우, 새로 생성하지 않고 즉시 반환 (싱글톤)
     if EMBEDDINGS is None:
-        EMBEDDINGS = HuggingFaceEmbeddings(
-            model_name="nlpai-lab/KURE-v1",
-            model_kwargs={'device': 'cpu'}
-        )
+        # Lock을 사용하여 단 한 번만 모델이 로드되도록 보장
+        with embedding_lock:
+            if EMBEDDINGS is None:
+                print("   ⏳ (최초 1회) 임베딩 모델 초기화 중...")
+                EMBEDDINGS = HuggingFaceEmbeddings(
+                    model_name="nlpai-lab/KURE-v1",
+                    model_kwargs={'device': 'cpu'}
+                )
     return EMBEDDINGS
 
 
@@ -76,6 +95,7 @@ class ConditionBuilder:
         self.jobs = []
         self.incomes = []
         self.educations = []
+        self.age_ranges = [] # ✅ [추가] 연령대 리스트
     
     def add_gender(self, keyword: str):
         kw = keyword.strip().lower()
@@ -89,11 +109,14 @@ class ConditionBuilder:
     def add_region(self, keyword: str):
         if keyword in VALID_REGIONS:
             self.regions.append(keyword)
-    
+
     def add_age_range(self, keyword: str):
         if '대' not in keyword:
             return
         
+        birth_start = None
+        birth_end = None
+
         if '~' in keyword:
             age_range = keyword.replace('대', '').split('~')
             if len(age_range) == 2 and age_range[0].isdigit() and age_range[1].isdigit():
@@ -101,23 +124,15 @@ class ConditionBuilder:
                 age_end = int(age_range[1])
                 birth_start = CURRENT_YEAR - age_end - 9
                 birth_end = CURRENT_YEAR - age_start
-                
-                self.conditions.append(
-                    "(structured_data->>'birth_year' ~ '^[0-9]+$' "
-                    "AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)"
-                )
-                self.params.extend([birth_start, birth_end])
         
         elif keyword[:-1].isdigit():
             age_prefix = int(keyword[:-1])
             birth_start = CURRENT_YEAR - age_prefix - 9
             birth_end = CURRENT_YEAR - age_prefix
-            
-            self.conditions.append(
-                "(structured_data->>'birth_year' ~ '^[0-9]+$' "
-                "AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)"
-            )
-            self.params.extend([birth_start, birth_end])
+        
+        # ✅ [수정] age_ranges에 추가
+        if birth_start is not None and birth_end is not None:
+            self.age_ranges.append((birth_start, birth_end))
     
     def add_job(self, keyword: str):
         kw = keyword.strip().lower()
@@ -230,6 +245,17 @@ class ConditionBuilder:
             self.conditions.append(f"(structured_data->>'region_major' IN ({placeholders}))")
             self.params.extend(self.regions)
         
+        # ✅ [추가] 연령대 조건 추가
+        if self.age_ranges:
+            age_conditions = []
+            for start, end in self.age_ranges:
+                age_conditions.append(
+                    "(structured_data->>'birth_year' ~ '^[0-9]+$' "
+                    "AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)"
+                )
+                self.params.extend([start, end])
+            self.conditions.append(f"({' OR '.join(age_conditions)})")
+
         if not self.conditions:
             return "", []
         
@@ -276,6 +302,7 @@ def search_welcome_objective(keywords: List[str]) -> Set[str]:
         
         if not where_clause:
             print("   ⚠️  Welcome 객관식: 조건 없음")
+            cur.close()
             return set()
         
         query = f"SELECT panel_id FROM welcome_meta2 {where_clause}"
@@ -287,49 +314,115 @@ def search_welcome_objective(keywords: List[str]) -> Set[str]:
         return results
     except Exception as e:
         print(f"   ❌ Welcome 객관식 검색 실패: {e}")
+        import traceback
+        traceback.print_exc()
         return set()
     finally:
         if conn:
             conn.close()
 
 
-def search_welcome_subjective(keywords: List[str]) -> Set[str]:
+def search_welcome_subjective(keywords: List[str], pre_filter_panel_ids: Optional[Set[str]] = None) -> Set[str]:
     """Welcome 주관식 Qdrant 검색"""
     if not keywords:
         print("   ⚠️  Welcome 주관식: 키워드 없음")
         return set()
-    
+
+    # ⭐️ 완전 평탄화 함수 (재귀)
+    def flatten_keywords(items):
+        flat = []
+        for item in items:
+            if isinstance(item, list):
+                flat.extend(flatten_keywords(item))  # 재귀적으로 평탄화
+            elif isinstance(item, str):
+                flat.append(item)
+            elif item is not None:
+                flat.append(str(item))
+        return flat
+
+    # ⭐️ 중첩 리스트까지 완전 평탄화
+    final_keywords = flatten_keywords(keywords)
+
+    # ✅ 평탄화된 리스트로 쿼리 텍스트 생성
+    query_text = " ".join(final_keywords)
+
+    if not query_text:
+        print("   ⚠️  Welcome 주관식: 평탄화 후 키워드 없음")
+        return set()
+
     try:
         embeddings = initialize_embeddings()
         qdrant_client = get_qdrant_client()
-        
+
         if not qdrant_client:
             print("   ❌ Welcome 주관식: Qdrant 연결 실패")
             return set()
-        
-        query_text = " ".join(keywords)
+
+        # ⭐️ query_text는 반드시 문자열이므로 embed_query 오류 해결됨
         query_vector = embeddings.embed_query(query_text)
         collection_name = os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors")
-        
-        search_results = qdrant_client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            limit=1000,
-            with_payload=True,
-            score_threshold=0.5
-        )
-        
+
+        # ✅ pre_filter_panel_ids가 있으면 필터 적용
+        if pre_filter_panel_ids:
+            panel_id_list = list(pre_filter_panel_ids)
+            chunk_size = 100
+            all_results = []
+
+            for i in range(0, len(panel_id_list), chunk_size):
+                chunk = panel_id_list[i:i+chunk_size]
+
+                try:
+                    qdrant_filter = Filter(
+                        must=[
+                            FieldCondition(
+                                key="metadata.panel_id",
+                                match=MatchAny(any=chunk)
+                            )
+                        ]
+                    )
+
+                    results = qdrant_client.search(
+                        collection_name=collection_name,
+                        query_vector=query_vector,
+                        query_filter=qdrant_filter,
+                        limit=len(chunk),
+                        score_threshold=0.3
+                    )
+
+                    if results:
+                        all_results.extend(results)
+
+                except Exception as e:
+                    print(f"   ⚠️  청크 검색 실패: {e}")
+                    continue
+
+            search_results = all_results
+
+        else:
+            # 필터 없이 전체 검색
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                limit=1000,
+                with_payload=True,
+                score_threshold=0.5
+            )
+
         panel_ids = set()
         for result in search_results:
             panel_id = extract_panel_id_from_payload(result.payload)
             if panel_id:
                 panel_ids.add(panel_id)
-        
+
         print(f"   ✅ Welcome 주관식: {len(panel_ids):,}명")
         return panel_ids
+
     except Exception as e:
         print(f"   ❌ Welcome 주관식 검색 실패: {e}")
+        import traceback
+        traceback.print_exc()
         return set()
+
 
 
 def search_welcome_two_stage(
@@ -354,73 +447,13 @@ def search_welcome_two_stage(
         print("   ℹ️  2단계 키워드 없음 → 1단계 결과 반환")
         return panel_ids_stage1
     
-    # 2단계: Qdrant
-    try:
-        embeddings = initialize_embeddings()
-        qdrant_client = get_qdrant_client()
-        
-        if not qdrant_client:
-            print("   ⚠️  Qdrant 연결 실패 → 1단계 결과 반환")
-            return panel_ids_stage1
-        
-        query_text = " ".join(subjective_keywords)
-        query_vector = embeddings.embed_query(query_text)
-        collection_name = os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors")
-        
-        panel_id_list = list(panel_ids_stage1)
-        chunk_size = 1000
-        all_results = []
-        
-        print(f"   🔄 청크 검색 시작 (대상: {len(panel_ids_stage1):,}명)")
-        
-        for i in range(0, len(panel_id_list), chunk_size):
-            chunk = panel_id_list[i:i+chunk_size]
-            
-            try:
-                qdrant_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="metadata.panel_id",
-                            match=MatchAny(any=chunk)
-                        )
-                    ]
-                )
-                
-                results = qdrant_client.search(
-                    collection_name=collection_name,
-                    query_vector=query_vector,
-                    query_filter=qdrant_filter,
-                    limit=min(limit, len(chunk)),
-                    score_threshold=0.3
-                )
-                
-                if results:
-                    all_results.extend(results)
-                
-            except Exception as e:
-                print(f"   ⚠️  청크 {i//chunk_size + 1} 검색 실패: {e}")
-                continue
-        
-        print(f"   📊 Qdrant 검색 결과: {len(all_results)}개")
-        
-        all_results.sort(key=lambda x: x.score, reverse=True)
-        all_results = all_results[:limit]
-        
-        panel_ids_stage2 = set()
-        for result in all_results:
-            panel_id = extract_panel_id_from_payload(result.payload)
-            if panel_id:
-                panel_ids_stage2.add(panel_id)
-        
-        print(f"   ✅ 2단계 최종 결과: {len(panel_ids_stage2):,}명")
-        return panel_ids_stage2
-        
-    except Exception as e:
-        print(f"   ❌ 2단계 검색 실패: {e}")
-        return panel_ids_stage1
+    # 2단계: Qdrant (pre_filter_panel_ids 전달)
+    panel_ids_stage2 = search_welcome_subjective(subjective_keywords, pre_filter_panel_ids=panel_ids_stage1)
+    
+    return panel_ids_stage2
 
 
-def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
+def search_qpoll(survey_type: str, keywords: List[str], pre_filter_panel_ids: Optional[Set[str]] = None) -> Set[str]:
     """QPoll Qdrant 검색"""
     if not keywords:
         print("   ⚠️  QPoll: 키워드 없음")
@@ -438,13 +471,50 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         query_vector = embeddings.embed_query(query_text)
         collection_name = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2")
         
-        search_results = qdrant_client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            limit=1000,
-            with_payload=True,
-            score_threshold=0.3
-        )
+        # ✅ pre_filter_panel_ids가 있으면 필터 적용
+        if pre_filter_panel_ids:
+            panel_id_list = list(pre_filter_panel_ids)
+            chunk_size = 100
+            all_results = []
+            
+            for i in range(0, len(panel_id_list), chunk_size):
+                chunk = panel_id_list[i:i+chunk_size]
+                
+                try:
+                    qdrant_filter = Filter(
+                        must=[
+                            FieldCondition(
+                                key="panel_id",
+                                match=MatchAny(any=chunk)
+                            )
+                        ]
+                    )
+                    
+                    results = qdrant_client.search(
+                        collection_name=collection_name,
+                        query_vector=query_vector,
+                        query_filter=qdrant_filter,
+                        limit=len(chunk),
+                        score_threshold=0.3
+                    )
+                    
+                    if results:
+                        all_results.extend(results)
+                
+                except Exception as e:
+                    print(f"   ⚠️  QPoll 청크 검색 실패: {e}")
+                    continue
+            
+            search_results = all_results
+        else:
+            # 필터 없이 전체 검색
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                limit=1000,
+                with_payload=True,
+                score_threshold=0.3
+            )
         
         print(f"   📊 Qdrant 검색 결과: {len(search_results)}개")
         
@@ -459,11 +529,13 @@ def search_qpoll(survey_type: str, keywords: List[str]) -> Set[str]:
         
     except Exception as e:
         print(f"   ❌ QPoll 검색 실패: {e}")
+        import traceback
+        traceback.print_exc()
         return set()
 
 
 def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Optional[int] = None) -> dict:
-    """하이브리드 검색"""
+    """하이브리드 검색 (기존 함수 - 호환성 유지)"""
     welcome_obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
     welcome_subj_keywords = classified_keywords.get('welcome_keywords', {}).get('subjective', [])
     
@@ -584,20 +656,18 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Op
     print(f"가중치: {results['weighted']['count']:,}명")
     print(f"{'='*70}\n")
 
-    # 1. limit 값이 주어졌는지 확인
+    # limit 처리
     if limit is not None and limit > 0:
         print(f"🎯 {limit}명 목표 충족 로직 실행...")
         
         final_panel_ids = []
         match_scores = {}
-        added_panel_ids_set = set() # 중복 제외를 위한 Set
+        added_panel_ids_set = set()
         
-        # 교집합과 가중치 점수 맵을 가져옴
         intersection_ids = results['intersection']['panel_ids']
         weighted_scores_map = results['weighted']['scores']
         
-        # 1순위: 교집합 결과
-        # (개선) 교집합 대상자 중에서도 '가중치 점수'가 높은 순으로 정렬
+        # 1순위: 교집합
         sorted_intersection_ids = sorted(
             intersection_ids,
             key=lambda pid: weighted_scores_map.get(pid, 0), 
@@ -610,28 +680,25 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Op
                 added_panel_ids_set.add(panel_id)
                 match_scores[panel_id] = weighted_scores_map.get(panel_id, 0.0)
             else:
-                break # 목표 달성 시 중단
+                break
         
         print(f"   1순위(교집합) 충족: {len(final_panel_ids):,} / {limit:,}명")
 
-        # 2순위: 가중치 결과 (교집합에서 추가된 인원 제외)
+        # 2순위: 가중치
         if len(final_panel_ids) < limit:
-            # 가중치 목록은 이미 점수순으로 정렬되어 있음
             weighted_ids = results['weighted']['panel_ids']
             
             for panel_id in weighted_ids:
                 if len(final_panel_ids) >= limit:
-                    break # 목표 달성 시 중단
+                    break
                 
-                # [중요] 1순위(교집합)에서 이미 추가된 ID는 건너뜀
                 if panel_id not in added_panel_ids_set:
                     final_panel_ids.append(panel_id)
-                    added_panel_ids_set.add(panel_id) # (사실상 2순위에서는 set 추가가 필수는 아님)
+                    added_panel_ids_set.add(panel_id)
                     match_scores[panel_id] = weighted_scores_map.get(panel_id, 0.0)
 
             print(f"   2순위(가중치) 충족: {len(final_panel_ids):,} / {limit:,}명")
 
-    # 2. limit 값이 없으면 기존 search_mode 로직 사용
     else:
         print(f"ℹ️  Limit 미지정. '{search_mode}' 모드 결과 반환.")
         if search_mode == 'intersection':
@@ -640,7 +707,7 @@ def hybrid_search(classified_keywords: dict, search_mode: str = "all", limit: Op
         elif search_mode == 'union':
             final_panel_ids = results['union']['panel_ids']
             match_scores = results['union']['scores']
-        else: # 'weighted' 또는 'all' (default)
+        else:
             final_panel_ids = results['weighted']['panel_ids']
             match_scores = results['weighted']['scores']
     

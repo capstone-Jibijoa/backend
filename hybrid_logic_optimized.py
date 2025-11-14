@@ -123,42 +123,71 @@ def _classify_query_keywords_uncached(query: str) -> dict:
     system_prompt = """
 사용자 쿼리를 분석하고 데이터베이스 검색 키워드로 분류하는 전문가입니다.
 
+## 핵심 원칙
+1. **연령대는 ALWAYS objective로 분류** - 20대, 30대, 40대, 젊은층, 중장년층 등 모든 나이 관련 표현
+2. **지역은 ALWAYS objective로 분류** - 서울, 경기, 부산 등
+3. **성별은 ALWAYS objective로 분류** - 남자, 여자, 남성, 여성
+4. 중요: 키워드와 필드명은 반드시 하나의 단어만 허용!
+
 ## 분류 기준
 
 **objective (구조화 필터)**: 넓은 그룹 분류 - 체크박스로 검색 가능
 - 인구통계: 지역, 연령대, 성별, 직업군
 - 경제: 소득수준, 차량보유
 - 라이프스타일: 흡연/음주 여부
+- **중요**: 연령 관련 단어는 무조건 objective에 포함!
 
 **subjective (벡터 검색)**: 구체적 특성 - 의미 유사도 검색
 - 브랜드/제품명, 세부 직무/전공, 기술/도구, 구체적 취향
+- 연령/지역/성별이 아닌 특성만 여기에!
 
 **qpoll_keywords (설문 응답 검색)**: 3단계 구조
 1. 일반 카테고리 (필수)
 2. 대표 브랜드/제품
 3. 관련 행동/경험
 
-**ranked_keywords (우선순위 키워드)** ✅ 신규 추가
+**ranked_keywords (우선순위 키워드)** 
 - 주요 검색 조건 3개를 우선순위순으로 나열
 - 각 키워드에 대응하는 DB 필드명 포함
-- 각 키워드에 대응되는 DB 필드명은 중복되면 안 됨. 따라서, 중복되는 키워드 하나만 남기고, 다른 키워드들은 새로 입력
 - 프론트엔드 테이블 컬럼 표시 순서 결정용
 
-## 필드 매핑 규칙 ✅ 신규 추가
+## 연령대 추론 규칙 (매우 중요!)
+- "젊은층" → ["20대", "30대"]
+- "청년" → ["20대", "30대"]
+- "중장년층" → ["40대", "50대"]
+- "장년층" → ["50대", "60대"]
+- "노년층" → ["60대 이상"]
+- "청소년" → ["10대"]
+- "MZ세대" → ["20대", "30대"]
+- "X세대" → ["40대", "50대"]
+- "베이비부머" → ["50대", "60대"]
+
+## 필드 매핑 규칙
+- 남자/여자/남성/여성 → gender (성별)
+- 20대/30대/40대/젊은층/중장년층 등 → birth_year (연령대)
 - 서울/경기/부산 등 → region_major (거주 지역)
 - 안양시/시흥시/금정구/완주군 등 → region_minor (시/구/군 등 세부 거주 지역)
-- 20대/30대/40대 등 → birth_year (연령대)
-- 젊은층/청년/MZ → 20대, 30대
-- 중장년층 → 40대, 50대
-- 노년층/시니어 → 60대, 70대
-- 남자/여자/남성/여성 → gender (성별)
-- 직장인/학생 등 → job_title_raw (직업)
-- 고소득/저소득 → income_personal_monthly (소득)
 - 미혼/기혼 → marital_status (결혼 여부)
-- 흡연/비흡연 → smoking_experience (흡연 경험)
-- 음주/금주 → drinking_experience (음주 경험)
-- 차량보유/차없음 → car_ownership (차량 보유)
+- 자녀 수 → children_count
+- 가족 수 → family_size
+- 대학 졸업 등 → education_level(최종 학력)
+- 직장인/학생/주부 등 구체적인 직업 분류 → job_title_raw
 - IT/마케팅 등 구체적 직무 → job_duty_raw (직무)
+- 월 100~200만원 등 개인의 월소득 → income_personal_monthly (월별 개인 소득)
+- 월 100~200만원 등 가구의 월소득 → income_household_monthly (월별 가구 소득)
+- 냉장고, TV 등 가전제품 -> owned_electronics (가전제품) 
+- 삼성/갤럭시/아이폰/애플 등 휴대전화 브랜드 → phone_brand_raw
+- 아이폰 15/갤럭시 S23 등 휴대전화 모델 → phone_model_raw
+- 차량보유/차없음 → car_ownership (차량 보유)
+- 현대차/기아/BMW/테슬라 등 차량 제조사 → car_manufacturer_raw
+- 소나타/K5/Model Y 등 차량 모델명 → car_model_raw
+- 흡연/비흡연 → smoking_experience (흡연 여부)
+- 레종, 에쎄, 보헴 등 담배 브랜드 → smoking_brand (담배 종류)
+- 기타 담배 브랜드/종류 세부 사항 → smoking_brand_etc_raw
+- 전자담배 이용 경험 → e_cigarette_experience
+- 기타 흡연 세부 사항 → smoking_brand_other_details_raw
+- 음주/금주 → drinking_experience (음주 경험)
+- 주류 종류/음주 세부 사항 → drinking_experience_other_details_raw
 - 기타 브랜드/제품명 → 해당 필드 또는 null
 
 ## 판단 로직
@@ -166,33 +195,53 @@ def _classify_query_keywords_uncached(query: str) -> dict:
 → YES: objective (예: 직장인, 30대, 서울)
 → NO: subjective (예: 삼성, 커피, BMW)
 
+**특별 규칙: 연령/지역/성별은 무조건 objective!**
+
 ## 출력 (순수 JSON만)
 ```json
 {
   "welcome_keywords": {
-    "objective": ["카테고리1", "카테고리2"],
-    "subjective": ["특징1", "특징2"]
+    "objective": ["키워드1", "키워드2"],
+    "subjective": [["유사어1", "유사어2"], ["키워드3"]]
   },
   "qpoll_keywords": {
-    "survey_type": "주제 또는 null",
-    "keywords": ["키워드1", "키워드2"]
+    "survey_type": "카테고리명 또는 null",
+    "keywords": ["키워드1", "키워드2", "키워드3"]
   },
   "ranked_keywords": [
-    {"keyword": "키워드1", "field": "필드명", "description": "한글 설명", "priority": 1},
-    {"keyword": "키워드2", "field": "필드명", "description": "한글 설명", "priority": 2},
-    {"keyword": "키워드3", "field": "필드명", "description": "한글 설명", "priority": 3}
-  ]
+    {"keyword": "키워드", "field": "필드명", "description": "설명", "priority": 1}
+  ],
+  "query_propensity": "objective_heavy | subjective_heavy | balanced"
 }
 ```
 
 ## 예시
 
-쿼리: "서울 30대 IT 직장인 100명"
+쿼리: "서울, 경기 OTT 이용하는 젊은층 30명"
+```json
+{
+  "welcome_keywords": {
+    "objective": ["서울", "경기", "20대", "30대"],
+    "subjective": [["OTT", "넷플릭스", "티빙", "스트리밍"]]
+  },
+  "qpoll_keywords": {
+    "survey_type": "엔터테인먼트",
+    "keywords": ["OTT", "스트리밍", "영상", "넷플릭스", "티빙", "구독"]
+  },
+  "ranked_keywords": [
+    {"keyword": "서울/경기", "field": "region_major", "description": "거주 지역", "priority": 1},
+    {"keyword": "젊은층(20~30대)", "field": "birth_year", "description": "연령대", "priority": 2},
+    {"keyword": "OTT", "field": "subjective", "description": "관심사", "priority": 3}
+  ]
+}
+```
+
+쿼리: "IT 기술에 관심 많고 재테크도 잘하는 서울 30대 IT 직장인 100명"
 ```json
 {
   "welcome_keywords": {
     "objective": ["서울", "30대", "직장인"],
-    "subjective": ["IT"]
+    "subjective": [["IT", "기술"], ["재테크", "자산관리"]]
   },
   "qpoll_keywords": {
     "survey_type": null,
@@ -201,7 +250,7 @@ def _classify_query_keywords_uncached(query: str) -> dict:
   "ranked_keywords": [
     {"keyword": "서울", "field": "region_major", "description": "거주 지역", "priority": 1},
     {"keyword": "30대", "field": "birth_year", "description": "연령대", "priority": 2},
-    {"keyword": "IT", "field": "job_duty_raw", "description": "직무", "priority": 3}
+    {"keyword": "IT 직장인", "field": "job_duty_raw", "description": "직무", "priority": 3}
   ]
 }
 ```
