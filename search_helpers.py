@@ -5,9 +5,8 @@ from typing import Optional, Tuple, List, Set
 from datetime import datetime
 import threading
 from dotenv import load_dotenv
-
 from db import get_db_connection_context, get_qdrant_client, get_db_connection
-from qdrant_client.models import Filter, FieldCondition, MatchAny
+from qdrant_client.http.models import Filter, FieldCondition, MatchAny
 from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
@@ -315,77 +314,46 @@ def search_welcome_objective(keywords: List[str]) -> Set[str]:
 def _perform_vector_search(
     search_type_name: str,
     collection_name: str,
-    keywords: List[str],
+    query_vector: List[float],
     panel_id_key: str,
     score_threshold: float,
     pre_filter_panel_ids: Optional[Set[str]] = None,
     flatten_keywords_flag: bool = False,
 ) -> Set[str]:
     """
-    [리팩토링] Qdrant 벡터 검색을 수행하는 공통 헬퍼 함수.
+    [리팩토링] Qdrant 벡터 검색을 수행하는 공통 헬퍼 함수. (search_batch 적용)
     Welcome 주관식, QPoll 검색에서 모두 사용됩니다.
     """
-    if not keywords:
+    if not query_vector:
         logging.info(f"   {search_type_name}: 키워드 없음")
         return set()
 
-    final_keywords = keywords
-    if flatten_keywords_flag:
-        # Welcome 주관식 검색을 위한 키워드 평탄화
-        def flatten(items):
-            flat = []
-            for item in items:
-                if isinstance(item, list):
-                    flat.extend(flatten(item))
-                elif item is not None:
-                    flat.append(str(item))
-            return flat
-        final_keywords = flatten(keywords)
-
-    query_text = " ".join(final_keywords)
-    if not query_text:
-        logging.info(f"   {search_type_name}: 처리 후 키워드 없음")
-        return set()
-
     try:
-        embeddings = initialize_embeddings()
         qdrant_client = get_qdrant_client()
         if not qdrant_client:
             logging.error(f"   {search_type_name}: Qdrant 연결 실패")
             return set()
-
-        query_vector = embeddings.embed_query(query_text)
 
         should_filter = pre_filter_panel_ids is not None and len(pre_filter_panel_ids) > 0
         if should_filter and len(pre_filter_panel_ids) > 50000:
             logging.warning(f"   {search_type_name}: 필터 ID가 {len(pre_filter_panel_ids):,}개로 너무 많아 필터링을 건너뜁니다.")
             should_filter = False
 
-        search_results = []
+        qdrant_filter = None
         if should_filter:
-            panel_id_list = list(pre_filter_panel_ids)
-            chunk_size = 100
-            for i in range(0, len(panel_id_list), chunk_size):
-                chunk = panel_id_list[i:i + chunk_size]
-                qdrant_filter = Filter(must=[FieldCondition(key=panel_id_key, match=MatchAny(any=chunk))])
-                try:
-                    results = qdrant_client.search(
-                        collection_name=collection_name, query_vector=query_vector,
-                        query_filter=qdrant_filter, limit=len(chunk), score_threshold=0.3
-                    )
-                    if results:
-                        search_results.extend(results)
-                except Exception as e:
-                    logging.warning(f"   {search_type_name} 청크 검색 실패: {e}")
-        else:
-            search_results = qdrant_client.search(
-                collection_name=collection_name, query_vector=query_vector,
-                limit=1000, with_payload=True, score_threshold=score_threshold
-            )
+            qdrant_filter = Filter(must=[FieldCondition(key=panel_id_key, match=MatchAny(any=list(pre_filter_panel_ids)))])
+
+        search_results = qdrant_client.search(
+            collection_name=collection_name, 
+            query_vector=query_vector,
+            query_filter=qdrant_filter, # None 또는 전체 필터
+            limit=len(pre_filter_panel_ids) if should_filter else 1000, # 필터가 있으면 ID 수만큼, 없으면 1000개
+            with_payload=True, 
+            score_threshold=score_threshold
+        )
 
         panel_ids = set()
         for result in search_results:
-            # payload에서 panel_id 추출 (경로가 다를 수 있음)
             pid = result.payload.get('panel_id') if 'panel_id' in result.payload else extract_panel_id_from_payload(result.payload)
             if pid:
                 panel_ids.add(str(pid))
@@ -397,34 +365,32 @@ def _perform_vector_search(
         logging.error(f"   {search_type_name} 검색 실패: {e}", exc_info=True)
         return set()
 
-def search_welcome_subjective(keywords: List[str], pre_filter_panel_ids: Optional[Set[str]] = None) -> Set[str]:
+def search_welcome_subjective(query_vector: List[float], pre_filter_panel_ids: Optional[Set[str]] = None, keywords: List[str] = None) -> Set[str]:
     """Welcome 주관식 Qdrant 검색"""
-    if not keywords:
-        logging.info("   Welcome 주관식: 키워드 없음")
+    if not query_vector:
+        logging.info("   Welcome 주관식: 벡터 없음")
         return set()
 
     return _perform_vector_search(
         search_type_name="Welcome 주관식",
         collection_name=os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors"),
-        keywords=keywords,
+        query_vector=query_vector, 
         panel_id_key="metadata.panel_id",
-        score_threshold=0.5,
-        pre_filter_panel_ids=pre_filter_panel_ids,
-        flatten_keywords_flag=True,
+        score_threshold=0.3, 
+        pre_filter_panel_ids=pre_filter_panel_ids
     )
 
-
-def search_qpoll(survey_type: str, keywords: List[str], pre_filter_panel_ids: Optional[Set[str]] = None) -> Set[str]:
+def search_qpoll(query_vector: List[float], pre_filter_panel_ids: Optional[Set[str]] = None, keywords: List[str] = None) -> Set[str]:
     """QPoll Qdrant 검색"""
-    if not keywords:
-        logging.info("   QPoll: 키워드 없음")
+    if not query_vector:
+        logging.info("   QPoll: 벡터 없음")
         return set()
 
     return _perform_vector_search(
         search_type_name="QPoll",
         collection_name=os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2"),
-        keywords=keywords,
+        query_vector=query_vector,
         panel_id_key="panel_id",
         score_threshold=0.3,
-        pre_filter_panel_ids=pre_filter_panel_ids,
+        pre_filter_panel_ids=pre_filter_panel_ids
     )
