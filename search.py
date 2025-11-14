@@ -7,7 +7,6 @@ import threading
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# 수정된 import
 from search_helpers import (
     initialize_embeddings, embedding_lock,
     search_welcome_objective, search_welcome_subjective, search_qpoll
@@ -33,41 +32,65 @@ def hybrid_search_parallel(
     logging.info("📌 2단계: 하이브리드 검색 (병렬 실행)")
     start_time = time.time()
     
-    # 1. 객관식 검색 (필터 셋)을 *먼저* 실행
-    logging.info("   🔄 Welcome 객관식 검색 (필터 셋 생성)...")
+    # 1. 객관식 검색
+    logging.info("   🔄 Welcome 객관식 검색...")
     panel_id1 = search_welcome_objective(welcome_obj_keywords)
-    logging.info(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명 (필터 셋)")
+    logging.info(f"   ✅ Welcome 객관식 완료: {len(panel_id1):,}명")
     
-    # 2. 주관식/QPoll을 병렬 실행 (필터 셋 전달)
+    # 2. 임베딩을 메인 스레드에서 미리 수행 (Lock 사용)
+    subjective_vector = None
+    qpoll_vector = None
+    embeddings = None # 임베딩 모델 인스턴스
+    
+    with embedding_lock:
+        try:
+            # 임베딩 모델 한 번만 로드
+            embeddings = initialize_embeddings() 
+            
+            if welcome_subj_keywords:
+                # Welcome 주관식용 텍스트 생성
+                def flatten(items):
+                    flat = []
+                    for item in items:
+                        if isinstance(item, list): flat.extend(flatten(item))
+                        elif item is not None: flat.append(str(item))
+                    return flat
+                subj_query_text = " ".join(flatten(welcome_subj_keywords))
+                if subj_query_text:
+                    subjective_vector = embeddings.embed_query(subj_query_text)
+            
+            qpoll_keywords = qpoll_data.get('keywords')
+            if qpoll_keywords:
+                qpoll_query_text = " ".join(qpoll_keywords)
+                if qpoll_query_text:
+                    qpoll_vector = embeddings.embed_query(qpoll_query_text)
+                    
+        except Exception as e:
+            logging.error(f"   ❌ 임베딩 생성 중 오류: {e}", exc_info=True)
+
+    # 3. 네트워크 I/O 작업만 병렬 실행
     panel_id2 = set()
     panel_id3 = set()
     
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = {}
         
-        if welcome_subj_keywords:
+        if subjective_vector: # 키워드가 아닌 *벡터*가 있으면 실행
             logging.info("   ⚡ Welcome 주관식 시작 (필터 적용)")
-            def subjective_search_with_lock(*args, **kwargs):
-                # 임베딩 모델 로딩은 스레드 안전해야 함
-                with embedding_lock:
-                    return search_welcome_subjective(*args, **kwargs)
             futures['subjective'] = executor.submit(
-                subjective_search_with_lock, 
-                welcome_subj_keywords,
-                pre_filter_panel_ids=panel_id1
+                search_welcome_subjective, 
+                query_vector=subjective_vector, 
+                pre_filter_panel_ids=panel_id1,
+                keywords=welcome_subj_keywords 
             )
         
-        qpoll_keywords = qpoll_data.get('keywords')
-        if qpoll_keywords:
+        if qpoll_vector: # 키워드가 아닌 *벡터*가 있으면 실행
             logging.info("   ⚡ QPoll 시작 (필터 적용)")
-            def qpoll_search_with_lock(*args, **kwargs):
-                with embedding_lock:
-                    return search_qpoll(*args, **kwargs)
             futures['qpoll'] = executor.submit(
-                qpoll_search_with_lock,
-                qpoll_data.get('survey_type'),
-                qpoll_keywords,
-                pre_filter_panel_ids=panel_id1
+                search_qpoll,
+                query_vector=qpoll_vector, 
+                pre_filter_panel_ids=panel_id1,
+                keywords=qpoll_keywords 
             )
         
         # 결과 수집

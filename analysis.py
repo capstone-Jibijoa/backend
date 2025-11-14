@@ -379,27 +379,45 @@ def analyze_search_results_optimized(
         used_fields = []
         objective_fields = set([f[0] for f in WELCOME_OBJECTIVE_FIELDS])
         
+        # --- ▼ [수정] 차트 생성을 병렬로 처리 ▼ ---
+        
+        # 1. 생성할 차트 작업 목록 정의
+        chart_tasks = []
         chart_count = 0
         for kw_info in ranked_keywords:
             if chart_count >= 2: break
             
             field = kw_info.get('field', '')
-            if not field or field not in objective_fields or field in used_fields:
+            if not field or field == 'unknown' or field not in objective_fields or field in used_fields:
                 continue
+                
+            chart_tasks.append(kw_info)
+            used_fields.append(field) # 
+            chart_count += 1
+
+        # 2. ThreadPoolExecutor로 차트 생성 병렬 실행
+        with ThreadPoolExecutor(max_workers=len(chart_tasks) or 1) as executor:
+            # create_chart_data_optimized 함수를 병렬 호출
+            def create_chart_task(kw_info):
+                field = kw_info.get('field', '')
+                return create_chart_data_optimized(
+                    kw_info.get('keyword', ''), 
+                    field, 
+                    kw_info.get('description', FIELD_NAME_MAP.get(field, field)),
+                    panels_data, 
+                    use_full_db=True
+                )
+
+            futures = {executor.submit(create_chart_task, kw_info): kw_info for kw_info in chart_tasks}
             
-            chart = create_chart_data_optimized(
-                kw_info.get('keyword', ''), 
-                field, 
-                kw_info.get('description', FIELD_NAME_MAP.get(field, field)),
-                panels_data, 
-                use_full_db=True # True로 설정하여 전체 DB 집계
-            )
-            
-            if chart.get('chart_data') and chart.get('ratio') != '0.0%':
-                charts.append(chart)
-                used_fields.append(field)
-                chart_count += 1
-                logging.info(f"   ✅ [{chart_count}] {field} 차트 생성 (DB 집계)")
+            for i, future in enumerate(as_completed(futures)):
+                chart = future.result()
+                if chart.get('chart_data') and chart.get('ratio') != '0.0%':
+                    charts.append(chart)
+                    logging.info(f"   ✅ [{i+1}] {chart_tasks[i].get('field')} 차트 생성 (DB 집계)")
+        
+        # (필요시) 순서를 위해 priority로 다시 정렬
+        charts.sort(key=lambda x: [kw.get('priority', 99) for kw in chart_tasks if kw.get('description') in x.get('topic', '')] or [99])
         
         # 3.5단계: 교차 분석 차트 생성 (검색 결과 기반)
         logging.info("   3.5단계: 교차 분석 차트 생성")
