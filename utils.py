@@ -32,7 +32,52 @@ WELCOME_OBJECTIVE_FIELDS = [
     ("drinking_experience", "음주 경험"),
     ("drinking_experience_other_details_raw", "음주 세부 사항")
 ]
-FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS)
+
+QPOLL_FIELDS = [
+    ("physical_activity", "체력 관리 활동"),
+    ("ott_count", "OTT 이용 개수"),
+    ("traditional_market_freq", "전통시장 방문 빈도"),
+    ("lunar_new_year_gift_pref", "설 선물 선호 유형"),
+    ("elementary_winter_memories", "겨울방학 기억"),
+    ("pet_experience", "반려동물 경험"),
+    ("moving_stress_factor", "이사 스트레스 요인"),
+    ("happiest_self_spending", "가장 기분 좋은 소비"),
+    ("most_used_app", "주요 사용 앱"),
+    ("stress_situation", "스트레스 상황"),
+    ("stress_relief_method", "스트레스 해소법"),
+    ("skin_satisfaction", "피부 만족도"),
+    ("skincare_spending", "스킨케어 월 소비"),
+    ("skincare_purchase_factor", "스킨케어 구매 요소"),
+    ("ai_chatbot_used", "AI 챗봇 사용 경험"),
+    ("ai_chatbot_main", "주요 AI 챗봇"),
+    ("ai_chatbot_purpose", "AI 챗봇 활용 용도"),
+    ("ai_chatbot_sentiment", "AI 챗봇 호감도"),
+    ("overseas_travel_pref", "해외여행 선호지"),
+    ("fast_delivery_usage", "빠른 배송 이용 제품"),
+    ("summer_worry", "여름철 주요 걱정"),
+    ("unused_item_disposal", "버리기 아까운 물건 처리"),
+    ("alarm_setting_style", "기상 알람 방식"),
+    ("eating_alone_frequency", "혼밥 빈도"),
+    ("happy_old_age_condition", "행복한 노년 조건"),
+    ("sweat_discomfort", "여름철 땀 불편함"),
+    ("most_effective_diet", "가장 효과적인 다이어트"),
+    ("late_night_snack_method", "야식 섭취 방법"),
+    ("favorite_summer_snack", "여름철 최애 간식"),
+    ("recent_major_spending", "최근 주요 지출처"),
+    ("ai_service_usage_area", "AI 서비스 활용 분야"),
+    ("minimalist_maximalist", "미니멀/맥시멀 성향"),
+    ("travel_planning_style", "여행 스타일"),
+    ("plastic_bag_reduction_effort", "비닐봉투 줄이기 노력"),
+    ("point_benefit_attention", "포인트 혜택 관심도"),
+    ("chocolate_consumption_time", "초콜릿 섭취 시점"),
+    ("personal_info_protection_habit", "개인정보보호 습관"),
+    ("summer_fashion_must_have", "여름 패션 필수템"),
+    ("no_umbrella_reaction", "우산 없을 때 대처"),
+    ("most_saved_photo_type", "갤러리 최다 저장 사진"),
+    ("favorite_summer_water_spot", "여름 물놀이 선호 장소")
+]
+
+FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS + QPOLL_FIELDS)
 
 
 def get_db_distribution(field_name: str) -> Dict[str, float]:
