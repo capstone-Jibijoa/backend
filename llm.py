@@ -86,13 +86,15 @@ PostgreSQL로 필터링 가능한 명확한 카테고리.
 
     logging.info(f"🔄 LLM 호출 중... (쿼리: {query})")
 
-    limit_match = re.search(r'(\d+)\s*명', query)
+    # [수정] 쿼리 텍스트에서 '명'이 포함된 모든 숫자를 찾아, 가장 마지막 숫자를 Limit으로 설정
     limit_value = None
+    all_limit_matches = re.findall(r'(\d+)\s*명', query)
 
-    if limit_match:
+    if all_limit_matches:
         try:
-            limit_value = int(limit_match.group(1))
-            logging.info(f"💡 인원 수 감지: {limit_value}명")
+            # 리스트의 마지막 요소가 사용자가 원하는 최종 Limit 값이라고 가정합니다.
+            limit_value = int(all_limit_matches[-1]) 
+            logging.info(f"💡 인원 수 감지 (최종): {limit_value}명")
         except ValueError:
             pass
 
