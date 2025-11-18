@@ -1,32 +1,39 @@
 version: 0.2
 
-env:
-  variables:
-    ECR_REPO_NAME: "jibijoa-backend"
-    AWS_ACCOUNT_ID: "121568407787"
-    AWS_REGION: "ap-southeast-2"
-    ECR_URI: "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+# 💡 수정: variables 섹션을 제거합니다. 변수는 commands 섹션 안에서 export 합니다.
+# variables: (삭제)
 
 phases:
   pre_build:
     commands:
+      # 1. 환경 변수 정의 및 export (commands 섹션 안에서 정의)
+      - export ECR_REPO_NAME="jibijoa-backend"
+      - export AWS_ACCOUNT_ID="121568407787"
+      - export AWS_REGION="ap-southeast-2"
+      - export ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+      
       - echo "Resolving commit hash..."
+      # 2. COMMIT_HASH 추출
       - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - echo "COMMIT_HASH: $COMMIT_HASH"
-
+      
+      # 3. ECR 로그인
       - echo "Logging in to Amazon ECR..."
-      - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+      - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URI}
 
   build:
     commands:
       - echo "Building Docker image..."
+      # 4. Docker 이미지 빌드
       - docker build -t ${ECR_URI}:${COMMIT_HASH} .
 
   post_build:
     commands:
+      # 5. ECR 푸시
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
 
+      # 6. ECS 배포 정의 파일 생성
       - echo "Creating imagedefinitions.json..."
       - printf '[{"name":"fastapi-backend","imageUri":"%s"}]' "${ECR_URI}:${COMMIT_HASH}" > imagedefinitions.json
       - cat imagedefinitions.json
