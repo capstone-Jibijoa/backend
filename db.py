@@ -1,3 +1,4 @@
+import os
 import psycopg2
 import psycopg2.pool
 import logging
@@ -5,7 +6,6 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from threading import Lock
 from contextlib import contextmanager
-from settings import settings
 
 load_dotenv()
 
@@ -25,10 +25,10 @@ def get_connection_pool():
                     _connection_pool = psycopg2.pool.ThreadedConnectionPool(
                         minconn=5,
                         maxconn=20,
-                        host=settings.DB_HOST,
-                        database=settings.DB_NAME,
-                        user=settings.DB_USER,
-                        password=settings.DB_PASSWORD,
+                        host=os.getenv("DB_HOST", "localhost"),
+                        database=os.getenv("DB_NAME", "default_db"),
+                        user=os.getenv("DB_USER", "postgres"),
+                        password=os.getenv("DB_PASSWORD"),
                         connect_timeout=5,
                         options="-c statement_timeout=30000"
                     )
@@ -98,8 +98,8 @@ def get_qdrant_client():
     """Qdrant 클라이언트를 생성하고 반환합니다."""
     try:
         client = QdrantClient(
-            host=settings.QDRANT_HOST,
-            port=settings.QDRANT_PORT,
+            host=os.getenv("QDRANT_HOST", "localhost"),
+            port=int(os.getenv("QDRANT_PORT", 6333)),
             timeout=20.0
         )
         return client
