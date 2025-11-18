@@ -1,16 +1,19 @@
 version: 0.2
 
-# 💡 수정: variables 섹션을 제거합니다. 변수는 commands 섹션 안에서 export 합니다.
-# variables: (삭제)
+variables:
+  ECR_REPO_NAME: jibijoa-backend
+  AWS_ACCOUNT_ID: 121568407787
+  AWS_REGION: ap-southeast-2
+  ECR_URI: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}
 
 phases:
   pre_build:
     commands:
-      # 1. 환경 변수 정의 및 export (commands 섹션 안에서 정의)
-      - export ECR_REPO_NAME="jibijoa-backend"
-      - export AWS_ACCOUNT_ID="121568407787"
-      - export AWS_REGION="ap-southeast-2"
-      - export ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}"
+      # 1. 환경 변수 정의 및 export
+      - export ECR_REPO_NAME=${ECR_REPO_NAME}
+      - export AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}
+      - export AWS_REGION=${AWS_REGION}
+      - export ECR_URI=${ECR_URI}
       
       - echo "Resolving commit hash..."
       # 2. COMMIT_HASH 추출
