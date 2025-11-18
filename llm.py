@@ -9,12 +9,13 @@ from functools import lru_cache
 from fastapi import HTTPException
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
+from settings import settings
 
 load_dotenv()
 
 # Claude 클라이언트 초기화
 try:
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1)
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1, api_key=settings.ANTHROPIC_API_KEY)
 except Exception as e:
     CLAUDE_CLIENT = None
     logging.error(f"Anthropic 클라이언트 생성 실패: {e}")
