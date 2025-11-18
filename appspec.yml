@@ -1,8 +1,9 @@
 version: 0.0
 os: linux
+
 files:
-  - source: /
-    destination: /home/ec2-user/codedeploy
+  - source: scripts/
+    destination: /home/ec2-user/codedeploy/scripts
 
 hooks:
   BeforeInstall:
