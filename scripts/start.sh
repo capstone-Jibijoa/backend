@@ -3,9 +3,23 @@ set -e
 
 echo "Starting docker container..."
 
-# IMAGE_TAG 환경변수가 설정되어 있는지 확인
+# 스크립트 디렉토리 경로
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+echo "Script directory: $SCRIPT_DIR"
+
+# IMAGE_TAG 파일에서 읽기
+if [ -f "$SCRIPT_DIR/IMAGE_TAG.txt" ]; then
+    IMAGE_TAG=$(cat "$SCRIPT_DIR/IMAGE_TAG.txt")
+    echo "Loaded IMAGE_TAG from file: $IMAGE_TAG"
+else
+    echo "ERROR: IMAGE_TAG.txt file not found in $SCRIPT_DIR"
+    ls -la "$SCRIPT_DIR"
+    exit 1
+fi
+
+# IMAGE_TAG 확인
 if [ -z "$IMAGE_TAG" ]; then
-    echo "ERROR: IMAGE_TAG environment variable is not set"
+    echo "ERROR: IMAGE_TAG is empty"
     exit 1
 fi
 
