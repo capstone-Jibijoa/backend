@@ -3,38 +3,44 @@ version: 0.2
 phases:
   pre_build:
     commands:
-      # 1. 환경 변수 정의 및 export
+      # 환경 변수 정의
       - export ECR_REPO_NAME=jibijoa-backend
       - export AWS_ACCOUNT_ID=121568407787
       - export AWS_REGION=ap-southeast-2
       - export ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}
       
+      # COMMIT_HASH 추출
       - echo "Resolving commit hash..."
-      # 2. COMMIT_HASH 추출
       - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - echo "COMMIT_HASH=$COMMIT_HASH"
       
-      # 3. ECR 로그인
+      # ECR 로그인
       - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URI}
       
   build:
     commands:
+      # Docker 이미지 빌드
       - echo "Building Docker image..."
-      # 4. Docker 이미지 빌드
       - docker build -t ${ECR_URI}:${COMMIT_HASH} .
+      - docker tag ${ECR_URI}:${COMMIT_HASH} ${ECR_URI}:latest
       
   post_build:
     commands:
-      # 5. ECR 푸시
+      # ECR 푸시
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
+      - docker push ${ECR_URI}:latest
       
-      # 6. ECS 배포 정의 파일 생성
-      - echo "Creating imagedefinitions.json..."
-      - printf '[{"name":"fastapi-backend","imageUri":"%s"}]' "${ECR_URI}:${COMMIT_HASH}" > imagedefinitions.json
-      - cat imagedefinitions.json
+      # 스크립트 파일들을 scripts 폴더로 복사
+      - echo "Preparing deployment scripts..."
+      - mkdir -p scripts
+      - cp install.sh scripts/
+      - cp start.sh scripts/
+      - cp stop.sh scripts/
+      - chmod +x scripts/*.sh
 
 artifacts:
   files:
-    - imagedefinitions.json
+    - appspec.yml
+    - scripts/**/*
