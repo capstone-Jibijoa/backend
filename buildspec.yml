@@ -40,17 +40,7 @@ phases:
       - printf '[{"name":"fastapi-backend","imageUri":"%s"}]' ${ECR_URI}:${COMMIT_HASH} > imagedefinitions.json
       - cat imagedefinitions.json
 
+# 이 부분의 들여쓰기를 phases 레벨과 맞추세요.
 artifacts:
   files:
     - imagedefinitions.json
-```
-eof
-
-### 2. Git 커밋 및 푸시
-
-1.  **로컬 `buildspec.yml` 파일**이 위의 코드로 수정되었는지 확인합니다.
-2.  수정된 파일을 Git에 커밋하고 푸시합니다.
-    ```bash
-    git add buildspec.yml
-    git commit -m "Fix: Use COMMIT_HASH variable directly and fix ECR URI in buildspec"
-    git push
