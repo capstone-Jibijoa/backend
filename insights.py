@@ -16,12 +16,13 @@ from utils import (
 )
 from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT # get_field_mapping import
 from db import get_db_connection_context, get_qdrant_client
+from functools import lru_cache
 
 
+@lru_cache(maxsize=64)
 def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str, float]:
     """
-    PostgreSQL에서 직접 집계하여 필드 분포 조회 (전체 DB 대상)
-    (캐시 롤백 버전)
+    PostgreSQL에서 직접 집계하여 필드 분포를 조회합니다. (전체 DB 대상)
     """
     try:
         with get_db_connection_context() as conn:
@@ -89,10 +90,10 @@ def get_field_distribution_from_db(field_name: str, limit: int = 10) -> Dict[str
         logging.error(f"   DB 집계 실패 ({field_name}): {e}", exc_info=True)
         return {}
     
+@lru_cache(maxsize=64)
 def get_qpoll_distribution_from_db(qpoll_field: str, limit: int = 10) -> Dict[str, float]:
     """
-    Qdrant Client를 사용하여 'qpoll_vectors_v2' 컬렉션에서 질문에 대한 응답 분포를 조회합니다.
-    (PostgreSQL 대신 Qdrant API를 사용합니다.)
+    Qdrant에서 Q-Poll 질문에 대한 응답 분포를 조회합니다.
     """
     question_text = QPOLL_FIELD_TO_TEXT.get(qpoll_field)
     if not question_text:
@@ -107,7 +108,6 @@ def get_qpoll_distribution_from_db(qpoll_field: str, limit: int = 10) -> Dict[st
     try:
         COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2")
         
-        # 1. 질문 텍스트로 필터 정의
         query_filter = Filter(
             must=[
                 FieldCondition(key="question", match=MatchValue(value=question_text))
@@ -117,9 +117,7 @@ def get_qpoll_distribution_from_db(qpoll_field: str, limit: int = 10) -> Dict[st
         all_points = []
         next_offset = None
         
-        # 2. 필터에 맞는 모든 포인트 스크롤 (전체 분포 집계를 위해 필요)
         while True:
-            # 한 번에 1000개씩 스크롤
             points, next_offset = client.scroll(
                 collection_name=COLLECTION_NAME,
                 scroll_filter=query_filter,
@@ -137,10 +135,8 @@ def get_qpoll_distribution_from_db(qpoll_field: str, limit: int = 10) -> Dict[st
         if total_count == 0:
             return {}
 
-        # 3. 'sentence' (응답) 필드 값의 분포 계산
         sentence_counts = Counter(p.payload.get("sentence") for p in all_points if p.payload and p.payload.get("sentence"))
         
-        # 4. 백분율 계산 및 상위 N개 필터링
         distribution = {
             sentence: round((count / total_count) * 100, 1)
             for sentence, count in sentence_counts.most_common(limit)
@@ -162,9 +158,8 @@ def create_chart_data_optimized(
     max_categories: int = 10
 ) -> Dict:
     """
-    차트 데이터 생성 (최적화 버전)
+    차트 데이터를 생성합니다.
     """
-    # 전체 DB 기반 분석
     if use_full_db:
         logging.info(f"       → DB 집계로 '{field_name}' 분석 (최적화)")
         distribution = get_field_distribution_from_db(field_name, max_categories)
@@ -187,7 +182,6 @@ def create_chart_data_optimized(
             "chart_data": [{"label": korean_name, "values": distribution}]
         }
     
-    # 검색 결과 기반 분석
     else:
         values = extract_field_values(panels_data, field_name)
         
@@ -200,7 +194,6 @@ def create_chart_data_optimized(
         if not filtered_distribution:
             return { "topic": korean_name, "description": "데이터 부족", "ratio": "0.0%", "chart_data": [] }
         
-        # 상위 N개만 + 기타
         if len(filtered_distribution) > max_categories:
             sorted_items = sorted(filtered_distribution.items(), key=lambda x: x[1], reverse=True)
             top_items = dict(sorted_items[:max_categories - 1])
@@ -223,19 +216,16 @@ def create_chart_data_optimized(
             }]
         }
 
-# analysis.py (업데이트된 create_qpoll_chart_data 함수)
-
 def create_qpoll_chart_data(
     qpoll_field: str,
     max_categories: int = 10
 ) -> Dict:
     """
-    Q-Poll 데이터 기반으로 차트 데이터 생성 (Welcome과 동일한 구조 반환)
+    Q-Poll 데이터 기반으로 차트 데이터를 생성합니다.
     """
     question_text = QPOLL_FIELD_TO_TEXT.get(qpoll_field, qpoll_field) 
     logging.info(f"       → Q-Poll Qdrant 집계로 '{qpoll_field}' 분석")
     
-    # Qdrant 분포 조회
     distribution = get_qpoll_distribution_from_db(qpoll_field, max_categories)
     
     if not distribution:
@@ -248,12 +238,8 @@ def create_qpoll_chart_data(
     
     final_distribution = distribution
     
-    # 상위 N개만 + 기타로 필터링 (get_qpoll_distribution_from_db에서 이미 most_common(limit)로 처리됨)
-    # 다만, Qdrant 스크롤/카운트가 정확한 전체 비율을 계산하지 못할 경우를 대비하여 여기서 다시 정규화하지 않음.
-    
     top_category, top_ratio = find_top_category(final_distribution)
     
-    # 복수 응답 여부를 질문 원문 텍스트의 키워드("모두 선택해주세요")로 확인
     is_array_type = "모두 선택해주세요" in question_text
 
     if is_array_type:
@@ -273,8 +259,8 @@ def create_qpoll_chart_data(
 
 def create_crosstab_chart(
     panels_data: List[Dict],
-    field1: str,  # 주축 (e.g., 'birth_year')
-    field2: str,  # 세그먼트 (e.g., 'gender')
+    field1: str,
+    field2: str,
     field1_korean: str,
     field2_korean: str,
     max_categories: int = 5
@@ -285,7 +271,6 @@ def create_crosstab_chart(
     logging.info(f"       → 교차 분석으로 '{field1}' vs '{field2}' 분석")
     from utils import get_age_group
 
-    # 1. 두 필드에 대한 데이터 추출
     crosstab_data = {}
     for item in panels_data:
         val1 = item.get(field1)
@@ -294,7 +279,6 @@ def create_crosstab_chart(
         if val1 is None or val2 is None:
             continue
 
-        # 값 처리 (연령대 변환 등)
         key1 = get_age_group(val1) if field1 == 'birth_year' else str(val1)
         key2 = str(val2)
 
@@ -305,13 +289,11 @@ def create_crosstab_chart(
     if not crosstab_data:
         return {}
 
-    # 2. 각 주축 카테고리별로 세그먼트 분포 계산
     chart_values = {}
     for key1, values2 in crosstab_data.items():
         distribution = calculate_distribution(values2)
         chart_values[key1] = distribution
 
-    # 3. 주축 카테고리가 너무 많으면 상위 N개만 선택
     if len(chart_values) > max_categories:
         # 각 카테고리의 전체 개수를 기준으로 정렬
         sorted_keys = sorted(chart_values.keys(), key=lambda k: sum(crosstab_data[k].count(v) for v in set(crosstab_data[k])), reverse=True)
@@ -330,12 +312,11 @@ def create_crosstab_chart(
 
 def _analyze_fields_in_parallel(panels_data: List[Dict], candidate_fields: List[Tuple[str, str]]) -> List[Dict]:
     """
-    [리팩토링] panels_data를 한 번만 순회하여 모든 후보 필드의 값을 집계하고 분포를 계산합니다.
+    panels_data를 한 번만 순회하여 모든 후보 필드의 값을 집계하고 분포를 계산합니다.
     """
     field_values = {field_name: [] for field_name, _ in candidate_fields}
     field_map = dict(candidate_fields)
 
-    # 데이터를 한 번만 순회하여 모든 필드의 값을 추출
     for item in panels_data:
         for field_name in field_values.keys():
             value = item.get(field_name)
@@ -379,7 +360,7 @@ def find_high_ratio_fields_optimized(
     max_charts: int = 3
 ) -> List[Dict]:
     """
-    검색 결과(panels_data) 내에서 높은 비율을 차지하는 필드 찾기 (병렬 처리)
+    검색 결과(panels_data) 내에서 높은 비율을 차지하는 필드를 찾습니다.
     """
     candidate_fields = []
     
@@ -398,15 +379,8 @@ def find_high_ratio_fields_optimized(
     for result in analysis_results:
         distribution = result['distribution']
         
-        # 100% 단일 카테고리 스킵
-        if len(distribution) == 1:
-            top_category, top_ratio = find_top_category(distribution) 
-            logging.info(f"   ⚠️  [{result['korean_name']}] 스킵: {top_category} {top_ratio}% (단일 카테고리 100%)")
-            continue
-        
         top_category, top_ratio = find_top_category(distribution)
         
-        # 50% 이상이라는 1차 임계값 통과 시
         if top_ratio >= threshold:
         
             final_distribution = distribution
@@ -441,18 +415,14 @@ def _generate_no_results_tips(classified_keywords: dict) -> str:
     
     total_filter_kws = len(objective_kws) + len(mandatory_kws)
 
-    # 1. 필터 조건이 너무 많을 때
     if total_filter_kws > 3:
         combined_kws = objective_kws + mandatory_kws
-        # [수정] f-string 중첩을 피하기 위해 포맷팅할 부분을 변수로 분리
         kws_str = ', '.join(f"'{k}'" for k in combined_kws[:3])
         tips.append(f"필터 조건({kws_str} 등)이 너무 많을 수 있습니다. 조건을 줄여보세요.")
 
-    # 2. 벡터 키워드가 있지만 결과가 없을 때
     if vector_kws:
         tips.append(f"'{', '.join(vector_kws)}'와 같은 키워드가 너무 구체적일 수 있습니다. 더 일반적인 단어로 바꿔보세요.")
 
-    # 3. 일반적인 팁
     tips.append("검색어에 오타가 없는지 확인하거나, '젊은층' 대신 '20대'처럼 더 명확한 키워드를 사용해 보세요.")
     
     summary = "검색 결과가 없습니다. 더 나은 결과를 위해 다음 팁을 확인해 보세요:\n"
@@ -467,7 +437,7 @@ def analyze_search_results_optimized(
     panel_id_list: List[str]
 ) -> Tuple[Dict, int]:
     """
-    검색 결과 분석 (최적화 버전)
+    검색 결과를 분석하여 차트와 요약을 생성합니다.
     """
     logging.info(f"📊 분석 시작 (최적화) - panel_id 수: {len(panel_id_list)}개")
     
@@ -476,7 +446,6 @@ def analyze_search_results_optimized(
         return {"main_summary": summary, "charts": []}, 200
     
     try:
-        # 1단계: 패널 데이터 조회
         logging.info("   1단계: 패널 데이터 조회 (utils.py 사용)")
         panels_data = get_panels_data_from_db(panel_id_list)
         
@@ -485,9 +454,6 @@ def analyze_search_results_optimized(
         
         logging.info(f"   ✅ {len(panels_data)}개 패널 데이터 조회 완료")
         
-        # 2단계: ranked_keywords 추출 및 매핑
-        # (주의: search.py에서 LLM 대신 규칙 기반 파서로 대체되었다면
-        #       classified_keywords['ranked_keywords_raw']가 올바르게 전달되어야 함)
         raw_keywords = classified_keywords.get('ranked_keywords_raw', [])
         ranked_keywords = []
         search_used_fields = set()
@@ -503,25 +469,23 @@ def analyze_search_results_optimized(
                     "keyword": keyword, 
                     "field": mapping["field"],
                     "description": mapping["description"], 
-                    "type": kw_type, # [수정] type 정보 저장
+                    "type": kw_type,
                     "priority": i + 1
                 })
                 
-                # [수정] 'filter' 타입이고 'unknown'이 아닌 경우에만 '뻔한 필드'로 추가
                 if kw_type == 'filter' and mapping["field"] != 'unknown':
                     search_used_fields.add(mapping["field"])
         
         if not ranked_keywords:
             logging.warning("   ⚠️  'ranked_keywords_raw' 없음. (Fallback 로직 실행)")
-            # (Fallback 로직은 LLM을 사용하지 않으므로 수정이 필요할 수 있음)
             obj_keywords = classified_keywords.get('welcome_keywords', {}).get('objective', [])
             for i, kw in enumerate(obj_keywords[:5]):
-                mapping = get_field_mapping(kw) # [수정] 수정된 함수 호출
+                mapping = get_field_mapping(kw)
                 ranked_keywords.append({
                     'keyword': kw, 
                     'field': mapping["field"],
                     'description': mapping["description"], 
-                    'type': mapping.get("type", "unknown"), # [수정] type 정보 저장
+                    'type': mapping.get("type", "unknown"),
                     'priority': i + 1
                 })
                 if mapping["type"] == 'filter' and mapping["field"] != 'unknown': # [수정] type 체크
@@ -534,38 +498,33 @@ def analyze_search_results_optimized(
         logging.info(f"   ✅ 분석 키워드: {[k.get('keyword') for k in ranked_keywords]}")
         logging.info(f"   ✅ 검색 사용 필드 (뻔한 인사이트 제외용): {search_used_fields}")
         
-        # 3단계: ranked_keywords 기반 차트 생성
         logging.info("   3단계: 주요 키워드 차트 생성 (DB 집계, 병렬)")
         charts = []
         used_fields = []
         objective_fields = set([f[0] for f in WELCOME_OBJECTIVE_FIELDS])
         
-        # 1. 생성할 차트 작업 목록 정의
         chart_tasks = [] 
         chart_count = 0
         for kw_info in ranked_keywords:
             if chart_count >= 2: break
             
             field = kw_info.get('field', '')
-            kw_type = kw_info.get('type', 'unknown') # [수정] type 가져오기
+            kw_type = kw_info.get('type', 'unknown')
             
             if field in used_fields:
                 continue
 
             if kw_type == 'filter':
                 if field in objective_fields and field != 'unknown':
-                    if panels_data: # Welcome 분석은 패널 데이터가 있을 때만 시도
+                    if panels_data:
                         chart_tasks.append({"type": "filter", "kw_info": kw_info})
                         used_fields.append(field)
                         chart_count += 1
             
-            elif kw_type == 'qpoll':
-                # Q-Poll 분석은 전체 DB 대상
+            elif kw_type == 'qpoll': # Q-Poll 분석은 전체 DB 대상
                 chart_tasks.append({"type": "qpoll", "kw_info": kw_info})
                 used_fields.append(field)
                 chart_count += 1
-
-        # 2. ThreadPoolExecutor로 차트 생성 병렬 실행
         if chart_tasks:
             with ThreadPoolExecutor(max_workers=len(chart_tasks) or 1) as executor:
                 
@@ -581,7 +540,7 @@ def analyze_search_results_optimized(
                             field, 
                             korean_name,
                             panels_data,
-                            use_full_db=False # [수정] 필터 키워드 분석 시, 전체 DB가 아닌 '검색 결과'를 기반으로 분석
+                            use_full_db=False
                         )
                     elif task["type"] == "qpoll":
                         return create_qpoll_chart_data( 
@@ -612,21 +571,15 @@ def analyze_search_results_optimized(
                 if 'priority' in chart:
                     del chart['priority']
 
-        # 3.5단계: 교차 분석 차트 생성
         logging.info("   3.5단계: 교차 분석 차트 생성")
         if len(charts) < 5 and len(ranked_keywords) > 0:
             
-            # [신규] 쿼리에 필터 조건이 없는 경우를 위한 교차분석 축 후보
             DEFAULT_CROSSTAB_AXES = [
                 ('birth_year', '연령대'),
                 ('gender', '성별'),
             ]
 
-            # Case 1: 필터 조건이 없는 경우 (e.g., "인기있는 차종은?")
             if not search_used_fields:
-                logging.info("   ✨ 필터 조건 없는 쿼리: 주제 중심 교차 분석 실행")
-                
-                # 1순위 must_have/preference 키워드를 '주제'로 선택
                 topic_kw = ranked_keywords[0]
                 topic_field = topic_kw.get('field')
                 topic_korean_name = topic_kw.get('description')
@@ -636,19 +589,14 @@ def analyze_search_results_optimized(
                     for axis_field, axis_korean_name in DEFAULT_CROSSTAB_AXES:
                         if len(charts) >= 5: break
                         
-                        # 주제와 축이 같으면 스킵
                         if topic_field == axis_field: continue
 
                         crosstab_chart = create_crosstab_chart(
-                            panels_data,
-                            axis_field, topic_field, # 축이 field1, 주제가 field2
-                            axis_korean_name, topic_korean_name
-                        )
+                            panels_data, axis_field, topic_field, axis_korean_name, topic_korean_name)
                         if crosstab_chart and crosstab_chart.get("chart_data"):
                             charts.append(crosstab_chart)
                             logging.info(f"   ✅ [{len(charts)}] 교차 분석 차트 생성 ({axis_korean_name} vs {topic_korean_name})")
 
-            # Case 2: 필터 조건이 있는 경우 (기존 로직)
             else:
                 CROSSTAB_CANDIDATES = [
                     ('gender', '성별'), ('birth_year', '연령대'), ('marital_status', '결혼 여부'),
@@ -661,7 +609,6 @@ def analyze_search_results_optimized(
                     primary_field = primary_kw.get('field')
                     primary_korean_name = primary_kw.get('description')
 
-                    # [수정] 보조축 선택 시, 주축과 다르고, '이미 사용된 필드'가 아닌 '검색에 사용된 필드'를 제외
                     secondary_field_info = next((
                         (field, korean) for field, korean in CROSSTAB_CANDIDATES 
                         if field != primary_field and field not in search_used_fields
@@ -669,7 +616,6 @@ def analyze_search_results_optimized(
 
                     if secondary_field_info:
                         secondary_field, secondary_korean_name = secondary_field_info
-                        # [수정] 주축과 보조축이 모두 검색 조건에 포함된 경우, 교차분석의 의미가 없으므로 스킵
                         if primary_field in search_used_fields and secondary_field in search_used_fields:
                             logging.warning(f"   ⚠️  교차 분석 스킵: 주축({primary_korean_name})과 보조축({secondary_korean_name})이 모두 검색 조건에 포함됨")
                             pass
@@ -691,16 +637,13 @@ def analyze_search_results_optimized(
                 else:
                     logging.warning("   ⚠️  교차 분석 스킵: 1순위 필터 키워드가 없음")
                 
-        # 4단계: 높은 비율 필드 찾기
         logging.info("   4단계: 높은 비율 필드 차트 생성 (검색 결과 기반)")
         needed_charts = 5 - len(charts)
-        # 3.5단계에서 보조축까지 제외됨
         exclude_fields_for_step4 = list(set(used_fields) | search_used_fields)
         
         if needed_charts > 0:
             high_ratio_fields = find_high_ratio_fields_optimized(
                 panels_data, 
-                # [롤백] 검색에 사용된 필드와 이미 차트로 만들어진 필드를 제외
                 exclude_fields=exclude_fields_for_step4,
                 threshold=50.0,
                 max_charts=needed_charts
@@ -718,7 +661,6 @@ def analyze_search_results_optimized(
                 charts.append(chart)
                 logging.info(f"   ✅ [{len(charts)}] {field_info['korean_name']} ({field_info['top_ratio']:.1f}%) 차트 생성")
         
-        # 5단계: 요약 생성
         main_summary = f"총 {len(panels_data)}명의 응답자 데이터를 분석했습니다. "
         if charts:
             top_chart = charts[0]
