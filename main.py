@@ -10,11 +10,11 @@ from typing import Optional, Tuple, Dict, List
 from fastapi.middleware.cors import CORSMiddleware
 
 from llm import classify_query_keywords
-from search_helpers import initialize_embeddings
-from search import hybrid_search_parallel as hybrid_search
-from analysis import (
+from search import initialize_embeddings
+from search import hybrid_search as hybrid_search
+from mapping_rules import QPOLL_FIELD_TO_TEXT, VECTOR_CATEGORY_TO_FIELD
+from insights import (
     analyze_search_results_optimized as analyze_search_results,
-    QPOLL_FIELD_TO_TEXT,
     get_field_mapping
 )
 from db import (
@@ -102,69 +102,108 @@ class AnalysisResponse(BaseModel):
 
 def _prepare_display_fields(classification: Dict) -> List[Dict]:
     """
-    [수정] ranked_keywords로부터 display_fields를 생성합니다.
-    - LLM의 ranked_keywords_raw를 기반으로 필드를 매핑하고 유니크하게 만듭니다.
+    [v2] classification 결과로부터 테이블 헤더(display_fields)를 생성합니다.
+    - `objective_keywords`와 `mandatory_keywords`를 우선적으로 사용합니다.
+    - `get_field_mapping`을 호출하여 각 키워드에 맞는 필드와 설명을 찾습니다.
     """
-    display_fields_raw = []
     
-    # [디버깅 로그 1] LLM이 반환한 원본 키워드 리스트를 가져옵니다.
-    ranked_keywords = classification.get('ranked_keywords_raw', [])
-    if not ranked_keywords:
-        logging.warning("⚠️ _prepare_display_fields: ranked_keywords_raw가 비어있습니다. 필드 매핑 건너뜀.")
-        # 키워드가 없으면 빈 리스트 반환 (이후 main.py에서 Fallback이 처리함)
+    # [수정] must_have, preference를 우선하고 objective는 후순위로 변경
+    objective_kws = classification.get('objective_keywords', [])
+    must_have_kws = classification.get('must_have_keywords', [])
+    preference_kws = classification.get('preference_keywords', [])
+    
+    # 핵심 주제(must-have, preference)를 먼저, 필터링 조건(objective)은 나중에
+    header_keywords = must_have_kws + preference_kws + objective_kws
+
+    if not header_keywords:
+        logging.warning("⚠️ _prepare_display_fields: 분석할 키워드가 없습니다. 빈 헤더 반환.")
         return []
-
-    for keyword in ranked_keywords[:5]:
         
-        # [수정 필요]: 이 함수는 classification 전체가 아닌 keyword 리스트를 받습니다.
-        # 따라서, 여기서는 keyword(str)를 analysis.py의 get_field_mapping에 넘겨야 합니다.
-        
-        # NOTE: get_field_mapping 함수는 analysis.py에서 import 되어 사용 가능하다고 가정합니다.
-        mapping = get_field_mapping(keyword) 
-        
-        field = mapping.get('field', 'unknown')
-        kw_type = mapping.get('type', 'filter')
-        priority = 999 # 임시 우선순위
-        
-        # [디버깅 로그 2] 키워드별 매핑 결과를 확인합니다.
-        logging.info(f"   [DEBUG_PREP] '{keyword}' 매핑 결과: {mapping}") 
-
-        # 매핑이 성공하고 'unknown'이 아닌 경우에만 처리
-        if field != 'unknown':
-            # 매핑 함수가 필드(f)를 분리하지 않고 단일 필드를 반환한다고 가정
-            f = field
-
-            # Welcome 필드는 그대로 추가
-            if kw_type == 'filter':
-                # 필터 타입 필드(region_major, birth_year 등)
-                display_fields_raw.append({
-                    'field': f,
-                    # FIELD_NAME_MAP은 utils.py에서 import 되어야 합니다.
-                    'label': FIELD_NAME_MAP.get(f, f), 
-                    'priority': priority
-                })
-            # QPoll 필드는 특별히 처리
-            elif kw_type == 'qpoll':
-                # QPOLL_FIELD_TO_TEXT는 analysis.py에서 import 되어야 합니다.
-                display_fields_raw.append({
-                    'field': f, 
-                    'label': QPOLL_FIELD_TO_TEXT.get(f, f), 
-                    'priority': priority
-                })
-
-    unique_display_fields_map = {}
-    for item in display_fields_raw:
-        if item['field'] not in unique_display_fields_map:
-            unique_display_fields_map[item['field']] = item
+    # [신규] objective_keywords 중 단일 값만 갖는 필드를 식별하여 헤더에서 제외
+    objective_field_counts = {}
+    for kw in objective_kws:
+        mapping = get_field_mapping(kw)
+        field = mapping.get('field')
+        if field and field != 'unknown':
+            if field not in objective_field_counts:
+                objective_field_counts[field] = 0
+            objective_field_counts[field] += 1
     
-    final_result = list(unique_display_fields_map.values())
+    # 값이 하나만 있는 필드(뻔한 결과)는 제외 대상
+    single_value_fields_to_exclude = {field for field, count in objective_field_counts.items() if count == 1}
+    logging.info(f"✨ [Display Fields] 단일 값 필드 제외 대상: {single_value_fields_to_exclude}")
+
+    unique_fields = {}
+    priority_counter = 0
+
+    for i, keyword in enumerate(header_keywords):
+        # 이미 5개 헤더가 채워졌으면 중단
+        if len(unique_fields) >= 5:
+            break
+
+        mapping = get_field_mapping(keyword)
+        field = mapping.get('field')
+
+        # [신규] 제외 대상 필드인 경우 건너뛰기 (단, objective 키워드에 대해서만 적용)
+        if keyword in objective_kws and field in single_value_fields_to_exclude:
+            logging.info(f"   → '{keyword}'(필드: {field})는 단일 조건이므로 헤더에서 제외")
+            continue
+
+        if field and field != 'unknown' and field not in unique_fields:
+            label = mapping.get('description')
+            # QPoll 필드의 경우, description이 질문 전체이므로 FIELD_NAME_MAP에서 짧은 이름으로 대체
+            if mapping.get('type') == 'qpoll':
+                label = FIELD_NAME_MAP.get(field, field)
+
+            unique_fields[field] = {
+                'field': field,
+                'label': label,
+                'priority': i # 원래 순서를 우선순위로 사용
+            }
+            priority_counter += 1
+
+    # [신규 추가] 벡터 검색 결과에서 발견된 Category 기반으로 필드 보강
+    found_categories = classification.get('found_categories', [])
+    if found_categories:
+        logging.info(f"✨ [Display Fields] 벡터 카테고리 기반 필드 보강 시작: {found_categories}")
+        for category in found_categories:
+            if len(unique_fields) >= 5:
+                break
+            
+            fields_to_add = VECTOR_CATEGORY_TO_FIELD.get(category, [])
+            for field in fields_to_add:
+                if len(unique_fields) >= 5:
+                    break
+                if field not in unique_fields:
+                    label = FIELD_NAME_MAP.get(field, field)
+                    logging.info(f"   → 카테고리 '{category}'를 통해 '{label}' 필드 추가")
+                    unique_fields[field] = {
+                        'field': field, 'label': label, 'priority': 800 + len(unique_fields)
+                    }
+
+    # [수정] 컬럼 보강 로직을 이 함수로 통합
+    if len(unique_fields) < 4:
+        FIELDS_TO_AUGMENT = ['family_size', 'job_duty_raw', 'marital_status']
+        
+        for field_key in FIELDS_TO_AUGMENT:
+            if len(unique_fields) >= 4:
+                break
+            
+            if field_key not in unique_fields:
+                korean_name = FIELD_NAME_MAP.get(field_key, field_key)
+                logging.info(f"✨ [Display Fields] 테이블 컬럼 보강: '{korean_name}' 추가")
+                unique_fields[field_key] = {
+                    'field': field_key,
+                    'label': korean_name,
+                    'priority': 900 + len(unique_fields) # 보강 필드는 낮은 우선순위
+                }
+
+    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
     logging.info(f"   [DEBUG_PREP] 최종 매핑 필드: {final_result}") 
-    
-    # Fallback은 main.py의 호출 함수 (search_panels, search_and_analyze)에서 처리됨
     return final_result
-
-
-def _build_pro_mode_response(
+ 
+ 
+def _build_pro_mode_response( 
     query_text: str,
     classification: Dict,
     search_results: Dict,
@@ -174,20 +213,22 @@ def _build_pro_mode_response(
     """
     Pro 모드의 복잡한 응답 본문을 생성합니다.
     """
-    source_counts = {
-        "welcome_objective_count": len(search_results['panel_id1']),
-        "welcome_subjective_count": len(search_results['panel_id2']),
-        "qpoll_count": len(search_results['panel_id3'])
+    # v2 검색 결과 구조에 맞게 source_counts를 stage_details에서 가져오도록 수정
+    source_counts = { 
+        "stage1_objective": search_results.get("stage_details", {}).get("stage1_objective", 0),
+        "stage2_must_have": search_results.get("stage_details", {}).get("stage2_must_have", 0),
+        "stage3_preference": search_results.get("stage_details", {}).get("stage3_preference", 0),
+        "stage4_negative": search_results.get("stage_details", {}).get("stage4_negative", 0),
     }
     
     summary = {
         "search_mode": effective_search_mode,
-        "search_strategy": {
-            "welcome_objective": bool(classification.get('welcome_keywords', {}).get('objective')),
-            "welcome_subjective": bool(classification.get('welcome_keywords', {}).get('subjective')),
-            "qpoll": bool(classification.get('qpoll_keywords', {}).get('keywords'))
-        },
-        "ranked_keywords": classification.get('ranked_keywords', [])
+        # "search_strategy": { # [수정] classification 키 구조 변경 대응
+        #     "welcome_objective": bool(classification.get('objective_keywords')),
+        #     "welcome_subjective": bool(classification.get('vector_keywords')),
+        #     "qpoll": bool(classification.get('qpoll_keywords'))
+        # },
+        "ranked_keywords": classification.get('ranked_keywords_raw', [])
     }
 
     response = {
@@ -198,38 +239,22 @@ def _build_pro_mode_response(
         "summary": summary,
     }
 
-    if effective_search_mode == "all":
-        # 'all' 모드는 모든 검색 결과를 포함
-        response["results"] = {}
-        panel_id_list = []
-        for mode_name, mode_results in search_results['results'].items():
-            response["results"][mode_name] = {
-                "count": mode_results['count'],
-                "panel_ids": mode_results['panel_ids'][:100],
-                "top_scores": {
-                    str(pid): mode_results['scores'].get(pid, 0)
-                    for pid in mode_results['panel_ids'][:10]
-                }
-            }
-            if 'weights' in mode_results:
-                response["results"][mode_name]['weights'] = mode_results['weights']
-        
-        panel_id_list = search_results['results']['weighted']['panel_ids']
-        response["final_panel_ids"] = panel_id_list[:100]
+    # v2 검색 결과 구조에 맞게 응답 포맷팅
+    final_panel_ids = search_results.get('final_panel_ids', [])
+    total_count = search_results.get('total_count', 0)
+    
+    # Pro 모드는 최대 100개의 ID만 반환
+    panel_id_list = final_panel_ids[:100]
+    response["final_panel_ids"] = panel_id_list
 
-    else: # 'quota', 'weighted', 'union', 'intersection'
-        final_panel_ids = search_results['final_panel_ids']
-        match_scores = search_results['match_scores']
-        
+    # 'results' 필드 구조 단순화
+    if effective_search_mode:
         response["results"] = {
             effective_search_mode: {
-                "count": len(final_panel_ids),
-                "panel_ids": final_panel_ids[:100],
-                "top_scores": {str(pid): match_scores.get(pid, 0) for pid in final_panel_ids[:10]}
+                "count": total_count,
+                "panel_ids": panel_id_list,
             }
         }
-        response["final_panel_ids"] = final_panel_ids[:100]
-        panel_id_list = final_panel_ids
 
     return response, panel_id_list
 
@@ -246,53 +271,45 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     user_limit = classification.get('limit')
     effective_search_mode = "quota" if user_limit and user_limit > 0 else search_mode
     logging.info(f"💡 API: 감지된 Limit 값: {user_limit}")
-
+    
     search_results = hybrid_search(
-        classification,
-        search_mode,
-        user_limit
+        query=query_text,
+        limit=user_limit
     )
     
     # 3. 검색 로그 기록
-    total_count = len(search_results['final_panel_ids'])
+    panel_id_list = search_results.get('final_panel_ids', []) # [수정] hybrid_search 결과에서 final_panel_ids 추출
+    total_count = len(panel_id_list)
     log_search_query(query_text, total_count)
     
     # 4. 응답 구성
-    classification = classify_query_keywords(query_text) # LLM 분류 결과
+    # [수정] classification 객체에 ranked_keywords_raw 추가
+    classification['ranked_keywords_raw'] = classification.get('objective_keywords', []) + classification.get('mandatory_keywords', [])
     display_fields = _prepare_display_fields(classification)
-    panel_ids_for_analysis = search_results['final_panel_ids']
     
-    # Lite 모드 응답 간소화
     if mode == "lite":
         lite_response = {
             "query": query_text,
             "classification": classification,
-            "display_fields": display_fields,
             "total_count": total_count,
-            "final_panel_ids": panel_ids_for_analysis[:500], # 테이블 조회를 위해 최대 500개
-            "effective_search_mode": effective_search_mode
+            "final_panel_ids": panel_id_list[:500], # 테이블 조회를 위해 최대 500개
+            "effective_search_mode": effective_search_mode,
+            "display_fields": display_fields
         }
 
-        # LLM 응답 구조에 맞춰 키를 명확히 삽입합니다.
-        lite_response['classification']['ranked_keywords_raw'] = classification.get('ranked_keywords_raw', [])
-
         logging.info("✅ 공통 검색 완료 (Lite 모드 간소화)")
-        return lite_response, panel_ids_for_analysis, classification
+        return lite_response, panel_id_list, classification
 
-    # Pro 모드 (기존 로직 유지)
     response, panel_id_list = _build_pro_mode_response(
         query_text,
         classification,
         search_results,
         display_fields,
-        effective_search_mode
+        effective_search_mode,
     )
     
-    # 분석을 위해 최대 5000개 ID 전달
-    panel_ids_for_analysis = panel_id_list[:5000]
-    
     logging.info("✅ 공통 검색 완료 (Pro 모드 전체 데이터)")
-    return response, panel_ids_for_analysis, classification
+    return response, panel_id_list, classification # [수정] 원본 classification 반환
 
 
 async def _get_ordered_welcome_data(
@@ -307,71 +324,46 @@ async def _get_ordered_welcome_data(
     if not ids_to_fetch:
         return []
 
-    # **1. fields_to_fetch가 None인지 확인하고 분기 처리**
-    if fields_to_fetch is not None:
-        # Lite Mode: fields_to_fetch가 리스트일 때만 필터링 수행
-        welcome_fields_to_fetch = [
-            f for f in fields_to_fetch if f in FIELD_NAME_MAP or f == 'panel_id'
-        ]
-        # 필터링 후 남은 필드가 없으면 panel_id만 가져옵니다.
-        if not welcome_fields_to_fetch:
-            welcome_fields_to_fetch = ['panel_id']
-    else:
-        # Pro Mode: fields_to_fetch가 None일 때 (전체 structured_data 조회 의도)
-        welcome_fields_to_fetch = None 
-        # 이 경우, 아래 쿼리 로직에서 structured_data 전체를 가져오도록 처리됩니다.
-
     table_data = []
     try:
         with get_db_connection_context() as conn:
             if not conn:
                 raise Exception("DB 연결 실패")
-            
-            cur = conn.cursor()
-            
-            # 2. SQL 쿼리 준비
-            if welcome_fields_to_fetch is not None:
-                # Lite Mode (특정 필드만 조회)
-                fields_for_select = [f for f in welcome_fields_to_fetch if f != 'panel_id']
-                
-                if fields_for_select:
-                    field_selects = ", ".join([
-                        f"structured_data->>'{field}' as \"{field}\""
-                        for field in fields_for_select
-                    ])
-                    sql_query = f"SELECT panel_id, {field_selects} FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
-                else:
-                    # panel_id만 남은 경우
-                    sql_query = "SELECT panel_id FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
-            else:
-                # Pro Mode (structured_data 전체 조회)
-                sql_query = "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
 
-            # 2. DB에서 데이터 조회
+            cur = conn.cursor()
+
+            # [수정] Lite/Pro 모드 구분 없이 structured_data 전체를 조회하여 일관성 확보
+            sql_query = "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
             cur.execute(sql_query, (ids_to_fetch,))
             results = cur.fetchall()
-            columns = [desc[0] for desc in cur.description]
 
-            # 3. 순서 재정렬을 위한 맵 생성
+            # 순서 재정렬을 위한 맵 생성
             fetched_data_map = {row[0]: row for row in results}
 
-            # 4. 입력된 ID 순서대로 결과 재구성
+            # 입력된 ID 순서대로 결과 재구성
             for pid in ids_to_fetch:
                 if pid in fetched_data_map:
                     row_data = fetched_data_map[pid]
-                    
-                    # 3. 데이터 파싱
-                    if welcome_fields_to_fetch is not None:
-                        # Lite 모드: 특정 필드만 포함된 딕셔너리 생성
-                        data = {columns[i]: row_data[i] for i in range(len(columns))}
+                    panel_id_val, structured_data_val = row_data
+
+                    # 최종적으로 테이블에 표시될 데이터 객체
+                    display_data = {'panel_id': panel_id_val}
+
+                    # fields_to_fetch가 제공되면 (Lite 모드), 해당 필드만 추출
+                    if fields_to_fetch:
+                        if isinstance(structured_data_val, dict):
+                            for field in fields_to_fetch:
+                                if field != 'panel_id':
+                                    display_data[field] = structured_data_val.get(field)
+                    # fields_to_fetch가 None이면 (Pro 모드), structured_data 전체를 병합
                     else:
-                        # Pro 모드: structured_data 전체를 포함
-                        data = row_data[1] or {}
-                        data['panel_id'] = pid
-                    table_data.append(data)
-            
+                        if isinstance(structured_data_val, dict):
+                            display_data.update(structured_data_val)
+
+                    table_data.append(display_data)
+
             cur.close()
-            
+
     except Exception as db_e:
         logging.error(f"Table Data 조회 실패: {db_e}", exc_info=True)
     
@@ -464,8 +456,8 @@ async def search_panels(search_query: SearchQuery):
         search_time = time.time() - start_time
         logging.info(f"⏱️  [Lite 모드] 검색 완료: {search_time:.2f}초")
         
-        # 2. 테이블 데이터 조회 (리팩토링된 함수 사용)
-        ids_to_fetch = lite_response['final_panel_ids']
+        # 2. 테이블 데이터 조회
+        ids_to_fetch = lite_response.get('final_panel_ids', [])
         display_fields = lite_response.get('display_fields', [])
         logging.info(f"lite_response: {lite_response}")
         logging.info(f"display_fields: {display_fields}")
@@ -473,26 +465,7 @@ async def search_panels(search_query: SearchQuery):
         qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
         welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
         
-        FALLBACK_WELCOME_FIELDS = ['gender', 'birth_year', 'family_size', 'job_duty_raw']
-        
-        if not welcome_fields and ids_to_fetch:
-            logging.warning("⚠️ Welcome 필드 누락! 기본 필드를 Fallback으로 사용합니다.")
-            welcome_fields = FALLBACK_WELCOME_FIELDS
-
-        # 2. Welcome 필드가 4개 미만인 경우, '가족 수'를 추가하여 4개를 확보
-        # 단, 이미 매핑된 필드가 아닌 경우에만 추가해야 합니다.
-        FIELDS_TO_AUGMENT = ['family_size', 'job_duty_raw', 'marital_status'] # 보강 후보 필드
-
-        current_welcome_fields_set = set(welcome_fields)
-        
-        for field_key in FIELDS_TO_AUGMENT:
-            if len(welcome_fields) >= 4:
-                break
-            
-            if field_key not in current_welcome_fields_set:
-                logging.info(f"✨ Lite 모드: 테이블 컬럼 보강을 위해 '{FIELD_NAME_MAP.get(field_key)}' 필드를 추가합니다.")
-                welcome_fields.append(field_key)
-                current_welcome_fields_set.add(field_key)
+        # [최종 수정] 모든 컬럼 보강 로직을 _prepare_display_fields로 통합했으므로, 여기서는 모두 제거합니다.
         
         db_start = time.time()
         
@@ -551,65 +524,17 @@ async def search_and_analyze(request: AnalysisRequest):
             request.search_mode,
             mode="pro"
         )
-
-        panel_id_list = response['final_panel_ids']
-
+        
         display_fields = response.get('display_fields', [])
         
-        # QPOLL_FIELD_TO_TEXT에 없는 필드가 display_fields에 하나라도 있는지 확인
-        # (즉, Welcome 필드가 분류되었는지 확인)
-        has_welcome_fields = any(item['field'] not in QPOLL_FIELD_TO_TEXT for item in display_fields)
-        
-        # Lite Mode와 동일한 Fallback 필드 정의 (필수 인구 통계 필드)
-        FALLBACK_WELCOME_FIELDS = ['gender', 'birth_year', 'family_size', 'job_duty_raw']
-        
-        FIELDS_TO_AUGMENT = ['family_size', 'job_duty_raw', 'marital_status'] 
-        
-        current_display_fields_set = set(item['field'] for item in display_fields)
-        fields_to_add_to_display = []
-        
-        # 1. LLM이 Welcome 필드를 분류하지 못한 경우, 기본 필드 4개로 대체 (헤더 보장)
-        if not has_welcome_fields and panel_id_list:
-            logging.warning("⚠️ Pro 모드: Welcome 필드 누락! 기본 필드를 display_fields에 Fallback으로 추가합니다.")
-            
-            # 기존 display_fields를 비우고 Fallback 4개로 시작
-            response['display_fields'] = [] 
-            current_display_fields_set = set()
-            
-            for field_key in FALLBACK_WELCOME_FIELDS:
-                korean_name = FIELD_NAME_MAP.get(field_key, field_key) 
-                response['display_fields'].append({
-                    'field': field_key,
-                    'label': korean_name,
-                    'priority': 999 
-                })
-                current_display_fields_set.add(field_key)
-            
-        # 2. LLM이 Welcome 필드를 분류했으나 4개 미만인 경우, 보강 후보로 채움
-        elif len(response['display_fields']) < 4:
-             for field_key in FIELDS_TO_AUGMENT:
-                if len(response['display_fields']) >= 4:
-                    break
-                
-                if field_key not in current_display_fields_set:
-                    logging.info(f"✨ Pro 모드: 테이블 컬럼 보강을 위해 '{FIELD_NAME_MAP.get(field_key)}' 필드를 추가합니다.")
-                    korean_name = FIELD_NAME_MAP.get(field_key, field_key)
-                    
-                    response['display_fields'].append({
-                        'field': field_key,
-                        'label': korean_name,
-                        'priority': 999 
-                    })
-                    current_display_fields_set.add(field_key)
-                    
-        display_fields = response['display_fields'] # 업데이트된 리스트를 이후 로직에서 사용
+        # [최종 수정] 모든 컬럼 보강 로직을 _prepare_display_fields로 통합했으므로, 여기서는 모두 제거합니다.
         
         # 2. 차트 데이터 생성
         logging.info("📊 [Pro 모드] 차트 데이터 생성 시작")
         analysis_result, status_code = analyze_search_results(
-            request.query,
+            request.query, 
             classification,
-            panel_id_list
+            panel_id_list[:5000] # 분석은 최대 5000개
         )
         
         if status_code == 200:

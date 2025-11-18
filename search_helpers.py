@@ -1,55 +1,30 @@
 import os
 import re
 import logging
-from typing import Optional, Tuple, List, Set
-from datetime import datetime
 import threading
+from typing import List, Set, Optional, Dict, Tuple
+from datetime import datetime
+from collections import defaultdict
 from dotenv import load_dotenv
 
-from db import get_db_connection_context, get_qdrant_client, get_db_connection
-from qdrant_client import QdrantClient 
+from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchAny, SearchParams
 from langchain_huggingface import HuggingFaceEmbeddings
 
+from db import get_db_connection_context
+from mapping_rules import CATEGORY_MAPPING, get_field_mapping
+
 load_dotenv()
 
+# ============================================================
+# 임베딩 모델 초기화 (싱글톤)
+# ============================================================
 EMBEDDINGS = None
 embedding_lock = threading.Lock()
 CURRENT_YEAR = datetime.now().year
 
-CATEGORY_MAPPING = {
-    '직장인': ['사무직', '전문직', '경영관리직', '생산노무직', '서비스직', '판매직', '기술직'],
-    '고소득': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
-    '저소득': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
-    '중산층': ['월 300~399만원', '월 400~499만원'],
-    '고학력': ['대학교 졸업', '대학원 재학 이상'],
-    '저학력': ['고등학교 졸업 이하', '중학교 졸업 이하'],
-    '젊은층': ['20대', '30대'],
-    '청년': ['20대', '30대'],
-    'MZ세대': ['20대', '30대'],
-    '중장년층': ['40대', '50대'],
-    'X세대': ['40대', '50대'],
-    '장년층': ['50대', '60대'],
-    '베이비부머': ['50대', '60대 이상'],
-    '노년층': ['60대 이상'],
-    '청소년': ['10대'],
-}
-VALID_REGIONS = [
-    '서울', '경기', '인천', '부산', '대구', '대전', '광주', '울산', '세종',
-    '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주'
-]
-def expand_keywords(keywords: List[str]) -> List[str]:
-    expanded = []
-    for keyword in keywords:
-        region_match = re.match(r'^(서울|경기|부산|인천|대구|광주|대전|울산|세종|강원|충북|충남|전북|전남|경북|경남|제주)(시|도)?$', keyword)
-        if region_match:
-            expanded.append(region_match.group(1))
-        elif keyword in CATEGORY_MAPPING:
-            expanded.extend(CATEGORY_MAPPING[keyword])
-        else:
-            expanded.append(keyword)
-    return expanded
 def initialize_embeddings():
+    """임베딩 모델 초기화 (싱글톤 패턴)"""
     global EMBEDDINGS
     if EMBEDDINGS is None:
         with embedding_lock:
@@ -57,315 +32,416 @@ def initialize_embeddings():
                 logging.info("⏳ (최초 1회) 임베딩 모델 초기화 중...")
                 EMBEDDINGS = HuggingFaceEmbeddings(
                     model_name="nlpai-lab/KURE-v1",
-                    model_kwargs={'device': 'cpu'} 
+                    model_kwargs={'device': 'cpu'}
                 )
     return EMBEDDINGS
-def extract_panel_id_from_payload(payload: dict) -> Optional[str]:
-    try:
-        if 'metadata' in payload and isinstance(payload['metadata'], dict):
-            panel_id = payload['metadata'].get('panel_id')
-            if panel_id: return str(panel_id)
-        panel_id = payload.get('panel_id')
-        if panel_id: return str(panel_id)
-        return None
-    except Exception:
-        return None
+
+# ============================================================
+# Stage 1: PostgreSQL Objective 필터링 (기존 로직)
+# ============================================================
+
 class ConditionBuilder:
+    """SQL 조건 빌더 (기존 로직 유지)"""
     def __init__(self):
         self.conditions = []
         self.params = []
-        self.regions = []
-        self.jobs = []
-        self.incomes = []
-        self.educations = []
-        self.age_ranges = []
-        self.job_duties = []
-        self.phone_brands = []
-        self.car_manufacturers = []
-        self.used_keywords = set() # [신규] 사용된 키워드 추적
-    def add_gender(self, keyword: str):
-        kw = keyword.strip().lower()
-        if re.match(r'^(남자|남성|남)$', kw):
-            self.conditions.append("(structured_data->>'gender' = %s)"); self.params.append('M')
-        elif re.match(r'^(여자|여성|여)$', kw):
-            self.conditions.append("(structured_data->>'gender' = %s)"); self.params.append('F')
-        else: return
-        self.used_keywords.add(keyword)
-    def add_region(self, keyword: str):
-        if keyword in VALID_REGIONS:
-            self.regions.append(keyword)
-            self.used_keywords.add(keyword)
-    def add_age_range(self, keyword: str):
-        if '대' not in keyword: return
-        birth_start = None; birth_end = None
-        if '~' in keyword:
-            age_range = keyword.replace('대', '').split('~')
-            if len(age_range) == 2 and age_range[0].isdigit() and age_range[1].isdigit():
-                age_start = int(age_range[0]); age_end = int(age_range[1])
-                birth_start = CURRENT_YEAR - age_end - 9; birth_end = CURRENT_YEAR - age_start
-        elif keyword[:-1].isdigit():
-            age_prefix = int(keyword[:-1])
-            birth_start = CURRENT_YEAR - age_prefix - 9; birth_end = CURRENT_YEAR - age_prefix
-        if birth_start is not None and birth_end is not None:
-            self.age_ranges.append((birth_start, birth_end))
-            self.used_keywords.add(keyword)
-    def add_job(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['사무직', '전문직', '경영관리직', '생산노무직', '서비스직', '판매직', '기술직', '직장인']:
-            self.jobs.append(keyword)
-            self.used_keywords.add(keyword)
-    def add_income(self, keyword: str):
-        if '월' in keyword and '만원' in keyword:
-            self.incomes.append(keyword)
-            self.used_keywords.add(keyword)
-    def add_education(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['대학교 졸업', '대학원 재학 이상', '고등학교 졸업 이하', '중학교 졸업 이하']:
-            self.educations.append(keyword)
-            self.used_keywords.add(keyword)
-    def add_job_duty(self, keyword: str):
-        kw = keyword.lower()
-        kw_normalized = kw.replace('직무', '').replace('가', '').strip() 
-        # 'it'와 같은 핵심 단어가 포함된 경우 job_duty 또는 job_title에서 검색
-        if kw_normalized in ['it', '개발', '기획', '마케팅', '디자인', '영업', '연구']:
-            self.job_duties.append(f'%{kw_normalized}%')
-            self.used_keywords.add(keyword)
-    def add_phone_brand(self, keyword: str):
-        kw = keyword.lower()
-        if kw in ['아이폰', '애플']: self.phone_brands.append('Apple')
-        elif kw in ['삼성', '갤럭시']: self.phone_brands.append('Samsung')
-        elif kw == 'lg': self.phone_brands.append('LG')
-        else: return
-        self.used_keywords.add(keyword)
-    def add_car_manufacturer(self, keyword: str):
-        kw = keyword.lower()
-        if kw in ['현대', '현대차']: self.car_manufacturers.append('현대')
-        elif kw == '기아': self.car_manufacturers.append('기아')
-        elif kw == 'bmw': self.car_manufacturers.append('BMW')
-        elif kw == '테슬라': self.car_manufacturers.append('테슬라')
-        else: return
-        self.used_keywords.add(keyword)
-    def add_marital_status(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['미혼', '싱글']:
-            self.conditions.append("(structured_data->>'marital_status' = %s)"); self.params.append('미혼')
-        elif kw in ['기혼', '결혼']:
-            self.conditions.append("(structured_data->>'marital_status' = %s)"); self.params.append('기혼')
-        elif kw in ['이혼', '돌싱', '사별']:
-            self.conditions.append("(structured_data->>'marital_status' LIKE %s)"); self.params.append('%기타%')
-        else: return
-        self.used_keywords.add(keyword)
-    def add_drinking(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['술먹는', '음주', '술', '맥주', '소주', '와인']:
-            self.conditions.append("(jsonb_array_length(COALESCE(structured_data->'drinking_experience', '[]'::jsonb)) > 0)")
-        elif kw in ['술안먹는', '금주']:
-            self.conditions.append("(jsonb_array_length(COALESCE(structured_data->'drinking_experience', '[]'::jsonb)) = 0)")
-        else: return
-        self.used_keywords.add(keyword)
-    def add_smoking(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['흡연', '담배']:
-            self.conditions.append("(jsonb_array_length(COALESCE(structured_data->'smoking_experience', '[]'::jsonb)) > 0)")
-        elif kw in ['비흡연', '금연']:
-            self.conditions.append("(jsonb_array_length(COALESCE(structured_data->'smoking_experience', '[]'::jsonb)) = 0)")
-        else: return
-        self.used_keywords.add(keyword)
-    def add_car_ownership(self, keyword: str):
-        kw = keyword.strip().lower()
-        if kw in ['차있음', '자가용', '차량보유']:
-            self.conditions.append("(structured_data->>'car_ownership' = %s)"); self.params.append('있다')
-        elif kw in ['차없음']:
-            self.conditions.append("(structured_data->>'car_ownership' = %s)"); self.params.append('없다')
-        else: return
-        self.used_keywords.add(keyword)
-    def add_family_size(self, keyword: str):
-        if '가족' not in keyword or not any(char.isdigit() for char in keyword): return
-        num_match = re.search(r'(\d+)', keyword);
-        if not num_match: return
-        num = int(num_match.group(1))
-        if '이상' in keyword:
-            self.conditions.append("(structured_data->>'family_size' ~ '[0-9]' AND CAST(substring(structured_data->>'family_size' from '[0-9]+') AS int) >= %s)"); self.params.append(num)
-        elif '이하' in keyword:
-            self.conditions.append("(structured_data->>'family_size' ~ '[0-9]' AND CAST(substring(structured_data->>'family_size' from '[0-9]+') AS int) <= %s)"); self.params.append(num)
+        self.grouped_conditions = {}
+
+    def add_condition(self, keyword: str, field: str):
+        if field not in self.grouped_conditions:
+            self.grouped_conditions[field] = []
+
+        if field == 'gender':
+            if keyword in ['남', '남자', '남성']: 
+                self.grouped_conditions[field].append('M')
+            elif keyword in ['여', '여자', '여성']: 
+                self.grouped_conditions[field].append('F')
+        
+        elif field == 'birth_year':
+            birth_start, birth_end = None, None
+            if '~' in keyword:
+                parts = keyword.replace('대', '').split('~')
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    age_start, age_end = int(parts[0]), int(parts[1])
+                    birth_start, birth_end = CURRENT_YEAR - age_end - 9, CURRENT_YEAR - age_start
+            elif '이상' in keyword:
+                match = re.search(r'(\d+)대\s*이상', keyword)
+                if match:
+                    age_start = int(match.group(1))
+                    birth_start, birth_end = 0, CURRENT_YEAR - age_start
+            elif keyword.endswith('대') and keyword[:-1].isdigit():
+                age_prefix = int(keyword[:-1])
+                birth_start, birth_end = CURRENT_YEAR - age_prefix - 9, CURRENT_YEAR - age_prefix
+            
+            if birth_start is not None:
+                self.grouped_conditions[field].append((birth_start, birth_end))
+        
+        elif field in ['job_duty_raw', 'job_title_raw', 'car_model_raw']:
+            self.grouped_conditions[field].append(f'%{keyword}%')
+        
         else:
-            self.conditions.append("(structured_data->>'family_size' ~ '[0-9]' AND CAST(substring(structured_data->>'family_size' from '[0-9]+') AS int) = %s)"); self.params.append(num)
-        self.used_keywords.add(keyword)
+            self.grouped_conditions[field].append(keyword)
+
     def finalize(self) -> Tuple[str, List]:
-        if self.jobs:
-            job_conditions = ["(structured_data->>'job_title_raw' ILIKE %s)" for _ in self.jobs]
-            self.conditions.append(f"({' OR '.join(job_conditions)})"); self.params.extend([f'%{job}%' for job in self.jobs])
-        if self.incomes:
-            income_conditions = ["(structured_data->>'income_personal_monthly' = %s)" for _ in self.incomes]
-            self.conditions.append(f"({' OR '.join(income_conditions)})"); self.params.extend(self.incomes)
-        if self.educations:
-            edu_conditions = ["(structured_data->>'education_level' = %s)" for _ in self.educations]
-            self.conditions.append(f"({' OR '.join(edu_conditions)})"); self.params.extend(self.educations)
-        if len(self.regions) == 1:
-            self.conditions.append("(structured_data->>'region_major' = %s)"); self.params.append(self.regions[0])
-        elif len(self.regions) > 1:
-            placeholders = ','.join(['%s'] * len(self.regions))
-            self.conditions.append(f"(structured_data->>'region_major' IN ({placeholders}))"); self.params.extend(self.regions)
-        if self.age_ranges:
-            age_conditions = []
-            for start, end in self.age_ranges:
-                age_conditions.append("(structured_data->>'birth_year' ~ '^[0-9]+$' AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)"); self.params.extend([start, end])
-            self.conditions.append(f"({' OR '.join(age_conditions)})")
-        if self.job_duties:
-            # 'IT' 같은 키워드가 'job_duty_raw' 또는 'job_title_raw'에 포함되는 경우 검색
-            duty_conditions = []
-            for duty in self.job_duties:
-                duty_conditions.append("((structured_data->>'job_duty_raw' ILIKE %s) OR (structured_data->>'job_title_raw' ILIKE %s))")
-                self.params.extend([duty, duty])
-            self.conditions.append(f"({' OR '.join(duty_conditions)})")
-        if self.phone_brands:
-            brand_conditions = ["(structured_data->>'phone_brand_raw' = %s)" for _ in self.phone_brands]
-            self.conditions.append(f"({' OR '.join(brand_conditions)})"); self.params.extend(self.phone_brands)
-        if self.car_manufacturers:
-            car_conditions = ["(structured_data->>'car_manufacturer_raw' = %s)" for _ in self.car_manufacturers]
-            self.conditions.append(f"({' OR '.join(car_conditions)})"); self.params.extend(self.car_manufacturers)
-        if not self.conditions: return "", []
-        where_clause = " WHERE " + " AND ".join(self.conditions)
-        return where_clause, self.params
+        final_conditions = []
+        final_params = []
+
+        for field, values in self.grouped_conditions.items():
+            if not values: 
+                continue
+
+            if field == 'birth_year':
+                conds = []
+                for start, end in values:
+                    conds.append(f"(structured_data->>'birth_year' ~ '^[0-9]+$' AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)")
+                    final_params.extend([start, end])
+                if conds: 
+                    final_conditions.append(f"({' OR '.join(conds)})")
+            
+            elif field in ['job_duty_raw', 'job_title_raw', 'car_model_raw']:
+                conds = [f"(structured_data->>'{field}' ILIKE %s)" for _ in values]
+                final_params.extend(values)
+                if conds: 
+                    final_conditions.append(f"({' AND '.join(conds)})")
+
+            else:
+                placeholders = ','.join(['%s'] * len(values))
+                final_conditions.append(f"(structured_data->>'{field}' IN ({placeholders}))")
+                final_params.extend(values)
+
+        if not final_conditions: 
+            return "", []
+        
+        where_clause = " WHERE " + " AND ".join(final_conditions)
+        return where_clause, final_params
+
+
+def _map_keywords_to_fields(keywords: List[str]) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    """키워드를 확장하고 필드에 매핑"""
+    expanded_keywords_map = defaultdict(set)
+    used_original_keywords = set()
+
+    for original_kw in keywords:
+        expanded_kws = CATEGORY_MAPPING.get(original_kw, [original_kw])
+        
+        for expanded_kw in expanded_kws:
+            mapping = get_field_mapping(expanded_kw)
+            
+            if mapping and mapping.get('type') == 'filter' and mapping.get('field') != 'unknown':
+                field = mapping['field']
+                expanded_keywords_map[field].add(expanded_kw)
+                used_original_keywords.add(original_kw)
+
+    return expanded_keywords_map, used_original_keywords
+
+
 def build_welcome_query_conditions(keywords: List[str]) -> Tuple[str, List, Set[str]]:
-    keywords = expand_keywords(keywords)
+    """키워드 리스트를 분석하여 SQL WHERE 절 생성"""
     builder = ConditionBuilder()
-    for keyword in keywords:
-        builder.add_gender(keyword); builder.add_region(keyword); builder.add_age_range(keyword)
-        builder.add_job(keyword); builder.add_income(keyword); builder.add_education(keyword)
-        builder.add_marital_status(keyword); builder.add_drinking(keyword); builder.add_smoking(keyword)
-        builder.add_car_ownership(keyword); builder.add_family_size(keyword)
-        builder.add_job_duty(keyword); builder.add_phone_brand(keyword); builder.add_car_manufacturer(keyword)
     
+    expanded_keywords_map, used_original_keywords = _map_keywords_to_fields(keywords)
+
+    for field, kws in expanded_keywords_map.items():
+        for kw in kws:
+            builder.add_condition(kw, field)
+
     where_clause, params = builder.finalize()
-    unhandled_keywords = set(keywords) - builder.used_keywords
+    unhandled_keywords = set(keywords) - used_original_keywords
     return where_clause, params, unhandled_keywords
+
+
 def search_welcome_objective(
-    keywords: List[str]
+    keywords: List[str],
+    attempt_name: str = "객관식"
 ) -> Tuple[Set[str], Set[str]]:
+    """
+    Stage 1: PostgreSQL로 Objective (demographic) 필터링
+    """
     if not keywords:
-        logging.info("   Welcome 객관식: 키워드 없음")
+        logging.info(f"   Welcome {attempt_name}: 키워드 없음")
         return set(), set()
+    
     try:
         with get_db_connection_context() as conn:
             if not conn:
-                logging.error("   Welcome 객관식: DB 연결 실패")
+                logging.error(f"   Welcome {attempt_name}: DB 연결 실패")
                 return set(), set()
+            
             cur = conn.cursor()
             where_clause, params, unhandled = build_welcome_query_conditions(keywords)
+            
             if not where_clause:
-                logging.info("   Welcome 객관식: 조건 없음"); cur.close()
+                logging.info(f"   Welcome {attempt_name}: 조건 없음")
+                cur.close()
                 return set(), unhandled
+            
             query = f"SELECT panel_id FROM welcome_meta2 {where_clause}"
             logging.info(f"   [SQL] {cur.mogrify(query, tuple(params)).decode('utf-8')}")
+            
             cur.execute(query, tuple(params))
             results = {str(row[0]) for row in cur.fetchall()}
             cur.close()
+        
         return results, unhandled
+    
     except Exception as e:
-        logging.error(f"   Welcome 객관식 검색 실패: {e}", exc_info=True)
+        logging.error(f"   Welcome {attempt_name} 검색 실패: {e}", exc_info=True)
         return set(), set(keywords)
 
-def _perform_vector_search(
-    search_type_name: str,
+
+# ============================================================
+# Stage 2: Must-have 엄격 검증
+# ============================================================
+
+def search_must_have_conditions(
+    must_have_keywords: List[str],
+    query_vectors: List[List[float]],
+    qdrant_client: QdrantClient,
     collection_name: str,
-    query_vector: List[float],
-    qdrant_client: QdrantClient, 
-    panel_id_key: str,
-    score_threshold: float,
-    limit: int = 5000,
-    hnsw_ef: Optional[int] = None,
-    qdrant_filter: Optional[Filter] = None
+    pre_filtered_panel_ids: Optional[Set[str]] = None,
+    threshold: float = 0.55,
+    hnsw_ef: int = 128
 ) -> Set[str]:
     """
-    [리팩토링] Qdrant 벡터 검색 (Top-K 후 교집합 전략)
-    - (수정) hnsw_ef 파라미터를 받아 검색 속도 튜닝
+    [v2 핵심 로직] Must-have 조건들을 AND 연산으로 엄격하게 검증
+    
+    전략:
+    1. 각 must-have 키워드마다 개별 벡터 검색 수행 (높은 threshold)
+    2. Pre-filtered panel_ids가 있으면 Qdrant filter로 범위 제한 (속도 향상)
+    3. 모든 검색 결과의 교집합 반환 (AND 로직)
+    
+    Parameters:
+    - must_have_keywords: 필수 조건 키워드 리스트
+    - query_vectors: 각 키워드에 대응하는 임베딩 벡터 리스트
+    - pre_filtered_panel_ids: PostgreSQL로 사전 필터링된 panel_id 집합
+    - threshold: 유사도 임계값 (기본 0.55, 높을수록 정확)
+    - hnsw_ef: 검색 정확도 파라미터 (기본 128)
+    
+    Returns:
+    - 모든 must-have 조건을 만족하는 panel_id 집합
     """
-    if not query_vector:
-        logging.info(f"   {search_type_name}: 쿼리 벡터 없음")
+    if not must_have_keywords or not query_vectors:
+        logging.info("   Must-have: 조건 없음")
+        return pre_filtered_panel_ids or set()
+    
+    if len(must_have_keywords) != len(query_vectors):
+        logging.warning(f"   Must-have: 키워드({len(must_have_keywords)})와 벡터({len(query_vectors)}) 개수 불일치")
+        return set()
+    
+    try:
+        # Qdrant filter 생성 (pre-filtered panel_ids로 검색 범위 제한)
+        qdrant_filter = None
+        if pre_filtered_panel_ids is not None: # None이 아닌 빈 set()일 수도 있으므로 is not None으로 체크
+            panel_ids_list = list(pre_filtered_panel_ids)
+            if panel_ids_list:
+                qdrant_filter = Filter(
+                    must=[
+                        # 'metadata.panel_id' 또는 'panel_id'에 따라 컬렉션 구조에 맞게 수정 필요
+                        # 여기서는 두 경우 모두를 가정하지 않고, 일반적인 필드명으로 사용
+                        FieldCondition(key="panel_id", match=MatchAny(any=panel_ids_list))
+                    ]
+                )
+                logging.info(f"   ⚡ Must-have: {len(panel_ids_list):,}명 범위 내에서 검색 (속도 향상)")
+            else:
+                # 사전 필터링 결과가 0명이면, 더 이상 검색할 필요가 없음
+                logging.info("   Must-have: 사전 필터링된 후보가 0명이므로 검색을 중단합니다.")
+                return set()
+        
+        search_params = SearchParams(hnsw_ef=hnsw_ef)
+        
+        # 각 키워드별로 검색하여 교집합 계산
+        result_sets = []
+        for i, (keyword, vector) in enumerate(zip(must_have_keywords, query_vectors)):
+            logging.info(f"   🔍 Must-have [{i+1}/{len(must_have_keywords)}]: '{keyword}' 검색 (threshold={threshold})")
+            
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=vector,
+                query_filter=qdrant_filter,
+                limit=3000,  # Must-have는 제한적으로 검색
+                with_payload=True,
+                score_threshold=threshold,
+                search_params=search_params
+            )
+            
+            panel_ids = set()
+            for result in search_results:
+                pid = result.payload.get('panel_id')
+                if not pid and 'metadata' in result.payload:
+                    pid = result.payload['metadata'].get('panel_id')
+                if pid:
+                    panel_ids.add(str(pid))
+            
+            logging.info(f"      → {len(panel_ids):,}명 검색됨 (유사도 {threshold}+ 조건 만족)")
+            result_sets.append(panel_ids)
+        
+        # 모든 결과의 교집합 (AND 로직)
+        if result_sets:
+            final_result = result_sets[0]
+            for result_set in result_sets[1:]:
+                final_result &= result_set
+            
+            logging.info(f"   ✅ Must-have 교집합 결과: {len(final_result):,}명 (모든 조건 만족)")
+            return final_result
+        
+        return set()
+    
+    except Exception as e:
+        logging.error(f"   ❌ Must-have 검색 실패: {e}", exc_info=True)
         return set()
 
-    try:
-        if not qdrant_client:
-            logging.error(f"   {search_type_name}: Qdrant 클라이언트가 없음")
-            return set()
-        
-        # ‼️ [신규] 검색 파라미터 설정
-        search_params = None
-        if hnsw_ef is not None:
-            logging.info(f"   ⚡ {search_type_name}: hnsw_ef={hnsw_ef}로 속도/정확도 튜닝 적용")
-            search_params = SearchParams(hnsw_ef=hnsw_ef)
-        
-        if qdrant_filter:
-            logging.info(f"   ⚡ {search_type_name}: 필터 적용하여 Top-{limit} 검색 시작")
-        else:
-            logging.info(f"   ⚡ {search_type_name}: 필터 없이 Top-{limit} 검색 시작")
-        
-        search_results = qdrant_client.search(
-            collection_name=collection_name, 
-            query_vector=query_vector,
-            query_filter=qdrant_filter, 
-            limit=limit,
-            with_payload=True, 
-            score_threshold=score_threshold,
-            search_params=search_params 
-        )
 
-        panel_ids = set()
-        for result in search_results:
-            pid = result.payload.get('panel_id') if 'panel_id' in result.payload else extract_panel_id_from_payload(result.payload)
-            if pid:
-                panel_ids.add(str(pid))
+def search_preference_conditions(
+    preference_keywords: List[str],
+    query_vectors: List[List[float]],
+    qdrant_client: QdrantClient,
+    collection_name: str,
+    candidate_panel_ids: Set[str],
+    threshold: float = 0.38,
+    top_k_per_keyword: int = 500
+) -> Tuple[List[tuple], List[str]]:
+    """
+    [v2 선호 조건] Preference 조건으로 후보를 스코어링하여 재순위화
+    
+    전략:
+    1. Candidate panel_ids 중에서만 검색 (이미 objective + must-have 통과)
+    2. 각 preference 키워드별 유사도 점수 집계
+    3. 점수 높은 순으로 정렬하여 반환
+    
+    Returns:
+    - [(panel_id, total_score), ...] 형태의 리스트 (점수 높은 순)
+    """
+    if not preference_keywords or not query_vectors or not candidate_panel_ids:
+        logging.info("   Preference: 조건 없음 또는 후보 없음")
+        return ([(pid, 0.0) for pid in candidate_panel_ids], [])
+    
+    try:
+        # Candidate panel_ids로 filter 생성
+        candidate_list = list(candidate_panel_ids)
+        if len(candidate_list) > 5000:
+            logging.warning(f"   ⚠️  Preference: 후보가 너무 많아({len(candidate_list):,}명) 상위 5000명만 검색")
+            candidate_list = candidate_list[:5000]
         
-        logging.info(f"   ✅ {search_type_name}: {len(panel_ids):,}명 (Top-{limit} 검색 결과)")
+        qdrant_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="panel_id",
+                    match=MatchAny(any=candidate_list)
+                )
+            ]
+        )
+        
+        # 각 panel_id별 점수 집계
+        panel_scores: Dict[str, float] = {pid: 0.0 for pid in candidate_panel_ids}
+        found_categories: List[str] = []
+        
+        for i, (keyword, vector) in enumerate(zip(preference_keywords, query_vectors)):
+            logging.info(f"   📊 Preference [{i+1}/{len(preference_keywords)}]: '{keyword}' 스코어링 (threshold={threshold})")
+            
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=vector,
+                query_filter=qdrant_filter,
+                limit=top_k_per_keyword,
+                with_payload=True,
+                score_threshold=threshold
+            )
+            
+            for result in search_results:
+                pid = result.payload.get('panel_id')
+                category = result.payload.get('category')
+                if not pid and 'metadata' in result.payload:
+                    pid = result.payload['metadata'].get('panel_id')
+                    category = result.payload['metadata'].get('category')
+                if pid and str(pid) in panel_scores:
+                    panel_scores[str(pid)] += result.score
+                    if category:
+                        found_categories.append(category)
+            
+            logging.info(f"      → {len([s for s in search_results if s.score >= threshold])}명에게 점수 부여")
+        
+        # 점수 높은 순으로 정렬
+        sorted_results = sorted(panel_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # 점수가 0보다 큰 것만 반환 (preference 조건에 일부라도 부합하는 사람)
+        filtered_results = [(pid, score) for pid, score in sorted_results if score > 0]
+        
+        logging.info(f"   ✅ Preference 스코어링 완료: {len(filtered_results):,}명 (0점 제외)")
+        return filtered_results, found_categories
+    
+    except Exception as e:
+        logging.error(f"   ❌ Preference 스코어링 실패: {e}", exc_info=True)
+        return ([(pid, 0.0) for pid in candidate_panel_ids], [])
+
+
+def filter_negative_conditions(
+    panel_ids: Set[str],
+    negative_keywords: List[str],
+    query_vectors: List[List[float]],
+    qdrant_client: QdrantClient,
+    collection_name: str,
+    threshold: float = 0.50
+) -> Set[str]:
+    """
+    [v2 부정 조건] Negative 조건을 만족하는 panel_id 제거
+    
+    전략:
+    1. Negative 키워드에 유사도가 높은 panel_id 찾기
+    2. 해당 panel_id를 결과에서 제거
+    
+    Returns:
+    - Negative 조건을 제외한 panel_id 집합
+    """
+    if not negative_keywords or not query_vectors or not panel_ids:
+        return panel_ids
+    
+    try:
+        panel_ids_to_exclude = set()
+        
+        for i, (keyword, vector) in enumerate(zip(negative_keywords, query_vectors)):
+            logging.info(f"   🚫 Negative [{i+1}/{len(negative_keywords)}]: '{keyword}' 제외 대상 검색 (threshold={threshold})")
+            
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=vector,
+                limit=5000,
+                with_payload=True,
+                score_threshold=threshold
+            )
+            
+            for result in search_results:
+                pid = result.payload.get('panel_id')
+                if not pid and 'metadata' in result.payload:
+                    pid = result.payload['metadata'].get('panel_id')
+                if pid:
+                    panel_ids_to_exclude.add(str(pid))
+            
+            logging.info(f"      → {len(panel_ids_to_exclude):,}명 제외 대상 추가")
+        
+        # Negative 조건 제거
+        result = panel_ids - panel_ids_to_exclude
+        logging.info(f"   ✅ Negative 필터링 완료: {len(panel_ids_to_exclude):,}명 제외, {len(result):,}명 남음")
+        
+        return result
+    
+    except Exception as e:
+        logging.error(f"   ❌ Negative 필터링 실패: {e}", exc_info=True)
         return panel_ids
 
+
+def embed_keywords(keywords: List[str], embeddings_model) -> List[List[float]]:
+    """
+    키워드 리스트를 임베딩 벡터 리스트로 변환
+    """
+    if not keywords:
+        return []
+    
+    try:
+        vectors = []
+        for keyword in keywords:
+            vector = embeddings_model.embed_query(keyword)
+            vectors.append(vector)
+        return vectors
     except Exception as e:
-        logging.error(f"   {search_type_name} 검색 실패: {e}", exc_info=True)
-        return set()
-
-
-def search_welcome_subjective(
-    query_vector: List[float], 
-    qdrant_client: QdrantClient, 
-    keywords: List[str] = None,
-    qdrant_filter: Optional[Filter] = None
-) -> Set[str]:
-    """Welcome 주관식 Qdrant 검색 (Top-K 전략)"""
-    if not query_vector:
-        logging.info("   Welcome 주관식: 벡터 없음")
-        return set()
-
-    return _perform_vector_search(
-        search_type_name="Welcome 주관식",
-        collection_name=os.getenv("QDRANT_COLLECTION_WELCOME_NAME", "welcome_subjective_vectors"),
-        query_vector=query_vector,
-        qdrant_client=qdrant_client, 
-        panel_id_key="metadata.panel_id",
-        score_threshold=0.38,
-        qdrant_filter=qdrant_filter
-    )
-
-
-def search_qpoll(
-    query_vector: List[float], 
-    qdrant_client: QdrantClient, 
-    keywords: List[str] = None,
-    qdrant_filter: Optional[Filter] = None 
-) -> Set[str]:
-    """QPoll Qdrant 검색 (Top-K 전략)"""
-    if not query_vector:
-        logging.info("   QPoll: 벡터 없음")
-        return set()
-
-    # [수정] _perform_vector_search에 필터 전달
-    return _perform_vector_search(
-        search_type_name="QPoll",
-        collection_name=os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2"),
-        query_vector=query_vector,
-        qdrant_client=qdrant_client, 
-        panel_id_key="panel_id",
-        score_threshold=0.35,
-        limit=5000,
-        qdrant_filter=qdrant_filter
-    )
+        logging.error(f"❌ 임베딩 실패: {e}", exc_info=True)
+        return []
