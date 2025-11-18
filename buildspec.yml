@@ -30,10 +30,10 @@ phases:
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
       
-      # appspec.yml에 IMAGE_TAG 주입
-      - echo "Injecting IMAGE_TAG into appspec.yml..."
-      - sed -i "s/IMAGE_TAG_PLACEHOLDER/${COMMIT_HASH}/g" appspec.yml
-      - cat appspec.yml
+      # IMAGE_TAG를 파일로 저장
+      - echo "Saving IMAGE_TAG to file..."
+      - echo "${COMMIT_HASH}" > scripts/IMAGE_TAG.txt
+      - cat scripts/IMAGE_TAG.txt
       
       # 스크립트 파일 확인 및 권한 부여
       - echo "Preparing deployment scripts..."
