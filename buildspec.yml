@@ -13,12 +13,12 @@ variables:
 phases:
   pre_build:
     commands:
-    - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-    - echo "Setting COMMIT_HASH to: $COMMIT_HASH"
+      - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - echo "Setting COMMIT_HASH to: $COMMIT_HASH"
       
     # 2. ECR 로그인
-    - echo Logging in to Amazon ECR...
-    - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.$AWS_REGION.amazonaws.com
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.$AWS_REGION.amazonaws.com
       
   build:
     commands:
