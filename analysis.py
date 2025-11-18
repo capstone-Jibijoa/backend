@@ -176,6 +176,24 @@ FIELD_MAPPING_RULES = [
     # 10. car_ownership / car_manufacturer_raw (차량) - String Pattern
     ("차량보유", {"field": "car_ownership", "description": "차량 보유 여부", "type": "filter"}),
     ("차없음", {"field": "car_ownership", "description": "차량 보유 여부", "type": "filter"}),
+
+    # 포괄적
+    # “자동차 제조사”, “차 회사”, “차량 회사”…, "자동차 선호도"와 같은 문구 단독일 때도 처리
+    (
+        re.compile(
+            r'(자동차|차량|차)\s*(제조사|브랜드|회사)',
+            re.IGNORECASE
+        ),
+        {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}
+    ),
+    (
+        re.compile(
+            r'((자동차|차량|차)\s*(선호|취향|좋아(함)?|선호도))|'
+            r'((선호|취향|좋아(함)?)\s*(자동차|차량|차))',
+            re.IGNORECASE
+        ),
+        {"field": "car_manufacturer_raw", "description": "자동차 선호도", "type": "filter"}
+    ),
     
     # --- 국내 브랜드 ---
     ("기아", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
