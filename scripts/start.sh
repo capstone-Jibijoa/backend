@@ -3,9 +3,30 @@ set -e
 
 echo "Starting docker container..."
 
+# IMAGE_TAG 환경변수가 설정되어 있는지 확인
+if [ -z "$IMAGE_TAG" ]; then
+    echo "ERROR: IMAGE_TAG environment variable is not set"
+    exit 1
+fi
+
+echo "IMAGE_TAG: $IMAGE_TAG"
+
 # 이전 컨테이너 있으면 중지 후 삭제
 sudo docker stop backend 2>/dev/null || true
 sudo docker rm backend 2>/dev/null || true
+
+# Secrets Manager에서 DB 비밀번호 가져오기
+echo "Fetching secrets from AWS Secrets Manager..."
+DB_PASSWORD=$(aws secretsmanager get-secret-value \
+    --secret-id prod/backend/secrets \
+    --region ap-southeast-2 \
+    --query SecretString \
+    --output text | jq -r .DB_PASSWORD)
+
+if [ -z "$DB_PASSWORD" ]; then
+    echo "ERROR: Failed to retrieve DB_PASSWORD from Secrets Manager"
+    exit 1
+fi
 
 # 컨테이너 실행 (환경변수 포함)
 sudo docker run -d \
@@ -17,12 +38,13 @@ sudo docker run -d \
   -e DB_HOST="project-main-db.crkcc42287ai.ap-southeast-2.rds.amazonaws.com" \
   -e DB_NAME="project_db" \
   -e DB_USER="backend_user" \
+  -e DB_PASSWORD="${DB_PASSWORD}" \
   -e PORT="5432" \
   -e QDRANT_HOST="52.63.128.220" \
   -e QDRANT_PORT="6333" \
   -e QDRANT_COLLECTION_WELCOME_NAME="welcome_subjective_vectors" \
   -e QDRANT_COLLECTION_QPOLL_NAME="qpoll_vectors_v2" \
-  121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
+  121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:${IMAGE_TAG}
 
 echo "Container started successfully."
 

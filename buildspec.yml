@@ -23,14 +23,17 @@ phases:
       # Docker 이미지 빌드
       - echo "Building Docker image..."
       - docker build -t ${ECR_URI}:${COMMIT_HASH} .
-      - docker tag ${ECR_URI}:${COMMIT_HASH} ${ECR_URI}:latest
       
   post_build:
     commands:
       # ECR 푸시
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
-      - docker push ${ECR_URI}:latest
+      
+      # appspec.yml에 IMAGE_TAG 주입
+      - echo "Injecting IMAGE_TAG into appspec.yml..."
+      - sed -i "s/IMAGE_TAG_PLACEHOLDER/${COMMIT_HASH}/g" appspec.yml
+      - cat appspec.yml
       
       # 스크립트 파일들을 scripts 폴더로 복사
       - echo "Preparing deployment scripts..."
