@@ -68,7 +68,4 @@ USER appuser
 EXPOSE 8000
 
 # 2.7 실행 명령어
-# Gunicorn을 사용하여 FastAPI 애플리케이션을 실행합니다.
-ENV GUNICORN_WORKERS 4
-
-CMD ["gunicorn", "main:app", "--workers", "${GUNICORN_WORKERS}", "--bind", "0.0.0.0:8000", "--worker-class", "uvicorn.workers.UvicornWorker", "--timeout", "120"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
