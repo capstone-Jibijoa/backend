@@ -2,48 +2,36 @@ version: '3.8'
 
 services:
   
-  # 1. FastAPI 백엔드 서비스 정의 (컨테이너만 EC2에서 실행)
   fastapi-backend:
-    # Dockerfile이 'workspace' 디렉터리 내에 있다고 가정합니다.
     build:
       context: ./workspace
       dockerfile: Dockerfile
     
     container_name: fastapi_backend
     
-    # EC2 호스트의 포트 8000을 컨테이너 포트 8000에 연결
     ports:
       - "8000:8000"
       
     restart: always
 
-    # 2. 환경 변수 주입 (Settings.py에서 사용)
-    # Secrets Manager ARN/이름과 비민감 변수를 구분합니다.
     environment:
-      # [Secrets Manager 접근 정보 - settings.py에서 사용]
-      # Secrets Manager에 저장된 설정들의 이름 (비민감)
       - APP_SECRET_CONFIG_NAME="prod/backend/secrets"
       - DEFAULT_REGION="ap-southeast-2"
-
-      # [비민감 설정 변수 - Plaintext 주입]
-      # Secrets Manager에 넣지 않고 docker-compose.yml에 바로 주입하는 값
       - DB_HOST="project-main-db.crkcc42287ai.ap-southeast-2.rds.amazonaws.com"
       - DB_NAME="project_db"
       - DB_USER="backend_user"
-      - PORT="5432"  # FastAPI 컨테이너가 사용할 포트
+      - PORT="5432"
       - QDRANT_HOST="52.63.128.220"
-      - QDRANT_PORT="6333"  # Qdrant 포트 (설정 파일에 맞춰 수정 필요)
+      - QDRANT_PORT="6333"
       - QDRANT_COLLECTION_WELCOME_NAME="welcome_subjective_vectors"
       - QDRANT_COLLECTION_QPOLL_NAME="qpoll_vectors_v2"
 
-    # 컨테이너 헬스 체크 설정 (선택적이지만 권장)
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
 
-# 3. 네트워크 정의
 networks:
   default:
     name: fastapi_network

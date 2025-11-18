@@ -2,8 +2,6 @@ import re
 from typing import List, Dict, Union, Tuple, Optional, Any
 import logging
 
-# [수정] LLM이 생성할 수 있는 유사 키워드를 확장 규칙에 추가
-# 키워드 확장용 매핑
 CATEGORY_MAPPING = {
     '직장인': ['사무직', '전문직', '경영관리직', '생산노무직', '서비스직', '판매직', '기술직'],
     '고소득': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
@@ -20,7 +18,6 @@ CATEGORY_MAPPING = {
     '베이비부머': ['50대', '60대 이상'],
     '노년층': ['60대 이상'],
     '청소년': ['10대'],
-    # 유사 키워드 추가
     '고소득자': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     '저소득자': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
     '아이폰 사용자': ['Apple'],
@@ -31,7 +28,6 @@ VALID_REGIONS = [
     '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주'
 ]
 
-# Q-Poll 질문 ID가 아닌, 질문 원문과 영어 키워드만 연결
 QPOLL_FIELD_TO_TEXT = {
     "physical_activity": "여러분은 평소 체력 관리를 위해 어떤 활동을 하고 계신가요? 모두 선택해주세요.",
     "ott_count": "여러분이 현재 이용 중인 OTT 서비스는 몇 개인가요?",
@@ -76,8 +72,6 @@ QPOLL_FIELD_TO_TEXT = {
     "favorite_summer_water_spot": "여러분이 여름철 물놀이 장소로 가장 선호하는 곳은 어디입니까?",
 }
 
-# 벡터 검색 결과의 category를 PostgreSQL 필드로 매핑
-# [최종 수정] 사용자가 제안한 1:N 매핑 규칙 적용
 VECTOR_CATEGORY_TO_FIELD = {
     "DEMO_BASIC": ["gender", "birth_year", "region_major", "region_minor"],
     "FAMILY_STATUS": ["marital_status", "family_size", "children_count"],
@@ -90,61 +84,62 @@ VECTOR_CATEGORY_TO_FIELD = {
 }
 
 
-# 1. 정적 매핑 규칙 (Python 코드로 관리)
 KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     # --- 인구통계 ---
-    (re.compile(r'^(여|여자|여성)$', re.IGNORECASE), {"field": "gender", "description": "성별", "type": "filter"}),
-    (re.compile(r'^(남|남자|남성)$', re.IGNORECASE), {"field": "gender", "description": "성별", "type": "filter"}), # 남성 추가
+    (re.compile(r'\b(여|여자|여성)\b', re.IGNORECASE), {"field": "gender", "description": "성별", "type": "filter"}),
+    (re.compile(r'\b(남|남자|남성)\b', re.IGNORECASE), {"field": "gender", "description": "성별", "type": "filter"}),
+    
     (re.compile(r'미혼|싱글'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
     (re.compile(r'기혼|결혼'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
+    (re.compile(r'이혼|돌싱'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
+    
     (re.compile(r'(\d+인|가족\s*\d+명|\d+인\s*가구)'), {"field": "family_size", "description": "가족 수", "type": "filter"}),
+    
+    (re.compile(r'자녀\s*수|아이\s*수|자녀\s*유무'), {"field": "children_count", "description": "자녀 수", "type": "filter"}),
+    
     ("대졸", {"field": "education_level", "description": "최종학력", "type": "filter"}),
-    (re.compile(r'(\d{2}대\s*(초반|중반|후반)|\d{2}대(\s*이상)?)'), {"field": "birth_year", "description": "연령대", "type": "filter"}),
     ("대학원", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("고학력", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("저학력", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("대학교 졸업", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("대학원 재학 이상", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("고등학교 졸업 이하", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+    ("중학교 졸업 이하", {"field": "education_level", "description": "최종학력", "type": "filter"}),
+
+    (re.compile(r'(\d{2}대(\s*(초반|중반|후반|이상))?)|젊은층|청년|MZ세대|엠지세대|중장년층|X세대|엑스세대|장년층|베이비부머|베이비붐|노년층|시니어|실버|청소년|10대', re.IGNORECASE), {"field": "birth_year", "description": "연령대", "type": "filter"}),
     
     # --- 지역 ---
+    (re.compile(r'(\w+시|\w+군|\w+구)(\s*거주|\s*사는)?'), {"field": "region_minor", "description": "거주 지역(시군구)", "type": "filter"}),
+    (re.compile(r'시군구|상세\s*지역'), {"field": "region_minor", "description": "거주 지역(시군구)", "type": "filter"}),
     (re.compile(r'|'.join(VALID_REGIONS) + r'(\s*에\s*사는|\s*거주자)?'), {"field": "region_major", "description": "거주 지역", "type": "filter"}),
-    
+
     # --- 직업/직무 ---
-    (re.compile(r'직장인|사무직|전문직|경영관리직|생산노무직|서비스직|판매직|기술직'), {"field": "job_duty_raw", "description": "직무", "type": "filter"}),
-    (re.compile(r'학생|대학생|대학원생'), {"field": "job_title_raw", "description": "직업", "type": "filter"}),
-    (re.compile(r'마케팅|마케터'), {"field": "job_duty_raw", "description": "직무", "type": "filter"}),
-    (re.compile(r'IT|개발|개발자'), {"field": "job_duty_raw", "description": "직무", "type": "filter"}),
+    (re.compile(r'직장인|사무직|전문직|경영관리직|생산노무직|서비스직|판매직|기술직|마케팅|마케터|it|개발|개발자', re.IGNORECASE), {"field": "job_duty_raw", "description": "직무", "type": "filter"}),
+    (re.compile(r'학생|대학생|대학원생|주부|무직|실업자|프리랜서|자영업자'), {"field": "job_title_raw", "description": "직업", "type": "filter"}),
 
     # --- 소득 ---
-    (re.compile(r'월소득|월\s*소득|개인소득|본인\s*소득'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
-    (re.compile(r'고소득|저소득|중산층'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
+    (re.compile(r'(월|월소득)\s*(\d+(?:만)?\s*~\s*)?(\d+)\s*만?원?(\s*이상|\s*이하)?'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
+    (re.compile(r'(연봉|연 소득)\s*(\d+(?:만)?\s*~\s*)?(\d+)\s*만?원?(\s*이상|\s*이하)?'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
+    (re.compile(r'월소득|월\s*소득|개인소득|본인\s*소득|고소득|저소득|중산층'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
     (re.compile(r'가구소득|가족\s*소득|가정\s*소득'), {"field": "income_household_monthly", "description": "월소득(가구)", "type": "filter"}),
 
     # --- 휴대폰 ---
-    (re.compile(r'아이폰|애플', re.IGNORECASE), {"field": "phone_brand_raw", "description": "휴대폰 브랜드", "type": "filter"}),
+    (re.compile(r'핸드폰|휴대폰|스마트폰|모바일\s*기기|폰\s*기종|휴대전화', re.IGNORECASE), {"field": "phone_brand_raw", "description": "휴대폰 브랜드", "type": "filter"}),
+    (re.compile(r'아이폰|애플|apple', re.IGNORECASE), {"field": "phone_brand_raw", "description": "휴대폰 브랜드", "type": "filter"}),
     (re.compile(r'갤럭시|삼성', re.IGNORECASE), {"field": "phone_brand_raw", "description": "휴대폰 브랜드", "type": "filter"}),
     (re.compile(r'lg', re.IGNORECASE), {"field": "phone_brand_raw", "description": "휴대폰 브랜드", "type": "filter"}),
-    
-    # [수정] '가전제품' 키워드를 PostgreSQL의 owned_electronics 필드와 연결
     (re.compile(r'가전|전자제품'), {"field": "owned_electronics", "description": "보유 가전", "type": "filter"}),
 
-    ("아이폰 15 pro 시리즈", {"field": "phone_model_raw", "description": "휴대폰 모델", "type": "filter"}),
-    # (re.compile(r'아이폰\s*se\s*3'), {"field": "phone_model_raw", "description": "휴대폰 모델", "type": "filter"}), # 누락된 정보 처리
-    # 중복된 항목 제거: {"field": "phone_model_raw", "description": "휴대폰 모델", "type": "filter"}
     (re.compile(r'(아이폰|iphone)\s*(15|14|13|12|11|x|se)', re.IGNORECASE), {"field": "phone_model_raw", "description": "휴대폰 모델", "type": "filter"}),
     (re.compile(r'갤럭시\s*(s|z|a|m|노트)\s*\d*', re.IGNORECASE), {"field": "phone_model_raw", "description": "휴대폰 모델", "type": "filter"}),
 
     # --- 차량 소유/모델 ---
-    # [수정] '차량 보유' 관련 키워드도 car_model_raw로 매핑하여 차종이 표시되도록 유도
-    (re.compile(r'차량\s*보유|차\s*있음||차\s*선호||자가용|차종|자동차\s*모델|차량\s*종류'), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
-    # [수정] '차 없음'은 car_ownership에 그대로 유지
-    (re.compile(r'차\s*없음|무소유'), {"field": "car_ownership", "description": "차량 보유 여부", "type": "filter"}),
+    (re.compile(r'차량\s*보유|차\s*있음|자가용|차종|자동차\s*모델|차량\s*종류|차량\s*타입'), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
+    (re.compile(r'차\s*없음|무소유|차량\s*없음'), {"field": "car_ownership", "description": "차량 보유 여부", "type": "filter"}),
     
-    # 국내 브랜드
     (re.compile(r'기아(차)?'), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'르노|르노삼성'), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'쌍용(차)?|kg\s*모빌리티', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'쉐보레|한국gm', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'현대(차)?'), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    ("제네시스", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
+    (re.compile(r'르노|르노삼성|쌍용(차)?|kg\s*모빌리티|쉐보레|한국gm|현대(차)?|제네시스', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
 
-    # 해외/수입차 브랜드
     ("아우디", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     ("벤틀리", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     (re.compile(r'bmw', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
@@ -158,22 +153,16 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     ("링컨", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     (re.compile(r'벤츠|메르세데스-벤츠'), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     (re.compile(r'미니|bmw\s*미니', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    ("닛산", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'포르쉐', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    ("롤스로이스", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    ("테슬라", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
+    (re.compile(r'닛산|포르쉐|롤스로이스|테슬라', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     (re.compile(r'도요타|토요타'), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    ("볼보", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-    (re.compile(r'폭스바겐', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
-
-    # 상용차 및 기타
+    (re.compile(r'볼보|폭스바겐', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     (re.compile(r'만|man', re.IGNORECASE), {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     ("스카니아", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     ("포톤", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     ("이스트", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     ("이베코", {"field": "car_manufacturer_raw", "description": "차량 제조사", "type": "filter"}),
     
-    # 모델명
+    # 모델명 (현대)
     (re.compile(r'그랜저|그랜져', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'소나타|쏘나타'), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'아반떼|아반테', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
@@ -187,6 +176,8 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     ("넥쏘", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'포터\s*2?', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'봉고\s*3?', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
+    
+    # 모델명 (기아)
     ("레이", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("모닝", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'k3', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
@@ -200,30 +191,28 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     ("모하비", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'ev6', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("니로", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
+    
+    # 모델명 (제네시스)
     (re.compile(r'제네시스\s*g70', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'제네시스\s*g80', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'제네시스\s*g90', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'제네시스\s*gv70', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'제네시스\s*gv80', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
 
-    # 르노삼성
+    # 모델명 (르노, KG, 쉐보레)
     (re.compile(r'xm3', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'sm6', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
-
-    # KG모빌리티 (구 쌍용)
     ("토레스", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("티볼리", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("코란도", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("렉스턴", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
-
-    # 쉐보레
     ("트레일블레이저", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("트랙스", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("말리부", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("트래버스", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("타호", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
 
-    # 수입차 (BMW, 벤츠, 아우디 등)
+    # 모델명 (수입차)
     (re.compile(r'bmw\s*3\s*시리즈', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'bmw\s*5\s*시리즈', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'bmw\s*x3', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
@@ -235,68 +224,44 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     (re.compile(r'테슬라\s*모델\s*3', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     (re.compile(r'테슬라\s*모델\s*y', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
 
-    # 기타 및 포괄적
     ("기타 국산차", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     ("기타 수입차", {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
-    (re.compile(r'suv|세단|트럭|승합', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
+    (re.compile(r'suv|세단|트럭|승합|경차|소형차|준중형차|중형차|준대형차|대형차', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
+    (re.compile(r'전기차|ev|하이브리드|수소차', re.IGNORECASE), {"field": "car_model_raw", "description": "차량 모델명", "type": "filter"}),
     
     # --- 흡연/음주 ---
     (re.compile(r'흡연'), {"field": "smoking_experience", "description": "흡연 여부", "type": "filter"}),
     (re.compile(r'비흡연|금연'), {"field": "smoking_experience", "description": "흡연 여부", "type": "filter"}),
 
-    # 담배 종류/브랜드
     ("레종", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
     ("에쎄", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
     ("보헴", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
     ("아프리카", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("더원", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("시즌", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("아이스볼트 gt", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
+    (re.compile(r'더원|시즌|아이스볼트 gt', re.IGNORECASE), {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
     (re.compile(r'디스플러스|디스'), {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("한라산", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("라일락", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("심플", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("타임", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("88리턴즈", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("말보로", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("팔리아멘트", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("메비우스", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("던힐", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("라크", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("카멜", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("다비도프", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("하모니", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("럭키스트라이크", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("버지니아 s", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("블랙데빌", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("켄트", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("클라우드 나인", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("토니노 람보르기니", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
-    ("하비스트", {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
+    (re.compile(r'한라산|라일락|심플|타임|88리턴즈'), {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
+    (re.compile(r'말보로|팔리아멘트|메비우스|던힐|라크|카멜|다비도프|하모니|럭키스트라이크|버지니아 s|블랙데빌|켄트|클라우드 나인|토니노 람보르기니|하비스트', re.IGNORECASE), {"field": "smoking_brand", "description": "담배 종류", "type": "filter"}),
 
-    # 전자 담배 이용 경험
     (re.compile(r'아이코스|iqos', re.IGNORECASE), {"field": "e_cigarette_experience", "description": "전자 담배 이용 경험", "type": "filter"}),
     (re.compile(r'릴|lil', re.IGNORECASE), {"field": "e_cigarette_experience", "description": "전자 담배 이용 경험", "type": "filter"}),
     (re.compile(r'글로|glo', re.IGNORECASE), {"field": "e_cigarette_experience", "description": "전자 담배 이용 경험", "type": "filter"}),
     (re.compile(r'차이코스|cqs', re.IGNORECASE), {"field": "e_cigarette_experience", "description": "전자 담배 이용 경험", "type": "filter"}),
     (re.compile(r'전자담배|궐련형', re.IGNORECASE), {"field": "e_cigarette_experience", "description": "전자 담배 이용 경험", "type": "filter"}),
     
-    # 음주 경험
     (re.compile(r'음주|술'), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    (re.compile(r'금주|비음주'), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    ("소주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    ("맥주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    ("저도주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    ("막걸리", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
+    (re.compile(r'금주|비음주|소주|맥주|저도주|막걸리|와인'), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
     (re.compile(r'양주|위스키|보드카|데킬라|진'), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
-    ("와인", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
+    
+    (re.compile(r'카스|테라|하이트|오비|클라우드|아사히|하이네켄', re.IGNORECASE), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
+    (re.compile(r'참이슬|진로|처음처럼|새로|좋은데이', re.IGNORECASE), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
+
     ("과일칵테일주", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
     (re.compile(r'일본청주|사케'), {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
     ("최근 1년 이내 술을 마시지 않음", {"field": "drinking_experience", "description": "음주 경험", "type": "filter"}),
 
-    # --- Q-Poll 키워드 (type: "qpoll") ---
-    (re.compile(r'체력\s*관리|운동'), {"field": "physical_activity", "description": QPOLL_FIELD_TO_TEXT["physical_activity"], "type": "qpoll"}),
-    (re.compile(r'ott|스트리밍\s*서비스'), {"field": "ott_count", "description": QPOLL_FIELD_TO_TEXT["ott_count"], "type": "qpoll"}),
+    # --- Q-Poll 키워드 ---
+    (re.compile(r'체력\s*관리|운동|헬스|피트니스|체육|요가|필라테스|수영'), {"field": "physical_activity", "description": QPOLL_FIELD_TO_TEXT["physical_activity"], "type": "qpoll"}),
+    (re.compile(r'ott|스트리밍|넷플릭스|디즈니|웨이브|티빙|쿠팡플레이|왓챠|온라인\s*영상|동영상\s*플랫폼', re.IGNORECASE), {"field": "ott_count", "description": QPOLL_FIELD_TO_TEXT["ott_count"], "type": "qpoll"}),
     ("전통시장", {"field": "traditional_market_freq", "description": QPOLL_FIELD_TO_TEXT["traditional_market_freq"], "type": "qpoll"}),
     (re.compile(r'설\s*선물|선물\s*선호'), {"field": "lunar_new_year_gift_pref", "description": QPOLL_FIELD_TO_TEXT["lunar_new_year_gift_pref"], "type": "qpoll"}),
     ("겨울방학", {"field": "elementary_winter_memories", "description": QPOLL_FIELD_TO_TEXT["elementary_winter_memories"], "type": "qpoll"}),
@@ -340,7 +305,9 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
 ]
 
 from utils import FIELD_NAME_MAP
+from functools import lru_cache
 
+@lru_cache(maxsize=512)
 def get_field_mapping(keyword: str) -> Optional[Dict[str, Any]]:
     """
     주어진 키워드에 대해 미리 정의된 매핑 리스트를 검색하여
@@ -352,29 +319,18 @@ def get_field_mapping(keyword: str) -> Optional[Dict[str, Any]]:
     Returns:
         Optional[Dict[str, Any]]: 일치하는 매핑 정보를 담은 딕셔너리 또는 None.
     """
-    # 쿼리 키워드를 소문자로 변환하여 검색 효율성 및 일관성 확보
     search_keyword = keyword.lower().strip()
 
     for pattern, mapping_info in KEYWORD_MAPPINGS:
-        # mapping_info는 수정될 수 있으므로 복사해서 사용
-        result_info = mapping_info.copy()
+        result_info = mapping_info.copy() # 원본 수정을 방지하기 위해 복사
         rule_type = result_info.get("type", "filter")
-
-        # insights.py의 로직을 통합: Q-Poll이 아닌 경우 FIELD_NAME_MAP에서 description을 가져옴
-        if rule_type != 'qpoll':
-            result_info["description"] = FIELD_NAME_MAP.get(result_info["field"], result_info.get("description", keyword))
-
         if isinstance(pattern, re.Pattern):
-            # 정규 표현식 패턴인 경우: 매치 여부 확인
             if pattern.search(search_keyword):
                 return result_info
         elif isinstance(pattern, str):
-            # 문자열 패턴인 경우: 'in' 연산자로 부분 일치 확인 (더 유연함)
             if pattern.lower() in search_keyword:
                 return result_info
                 
-    # 매핑 규칙을 찾지 못하면 unknown 객체 반환
-    logging.warning(f" ⚠️  '{keyword}'에 대한 매핑 규칙 없음. 'unknown'(벡터)으로 처리.")
     return {
         "field": "unknown", 
         "description": keyword, 

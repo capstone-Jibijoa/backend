@@ -14,7 +14,7 @@ _pool_lock = Lock()
 
 def get_connection_pool():
     """
-    싱글톤 패턴으로 PostgreSQL Connection Pool을 생성하고 관리합니다.
+    싱글톤 패턴으로 PostgreSQL Connection Pool을 생성하고 반환합니다.
     """
     global _connection_pool
     
@@ -110,7 +110,7 @@ def get_qdrant_client():
 
 def log_search_query(query: str, results_count: int, user_uid: int = None):
     """
-    사용자 검색 쿼리와 결과 수를 데이터베이스에 기록합니다.
+    검색 쿼리와 결과 수를 데이터베이스에 기록합니다.
     """
     with get_db_connection_context() as conn:
         if not conn:

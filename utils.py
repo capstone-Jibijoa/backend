@@ -30,7 +30,8 @@ WELCOME_OBJECTIVE_FIELDS = [
     ("e_cigarette_experience", "전자 담배 이용 경험"),
     ("smoking_brand_other_details_raw", "기타 흡연 세부 사항"),
     ("drinking_experience", "음주 경험"),
-    ("drinking_experience_other_details_raw", "음주 세부 사항")
+    ("drinking_experience_other_details_raw", "음주 세부 사항"),
+    ("owned_electronics", "보유 가전")
 ]
 
 QPOLL_FIELDS = [
@@ -80,71 +81,6 @@ QPOLL_FIELDS = [
 FIELD_NAME_MAP = dict(WELCOME_OBJECTIVE_FIELDS + QPOLL_FIELDS)
 
 
-def get_db_distribution(field_name: str) -> Dict[str, float]:
-    """
-    [삭제 가능성 검토]
-    DB에서 직접 필드 분포를 집계합니다. (analysis.py의 함수와 중복됨)
-    만약 analysis.py 외 다른 곳에서 이 함수를 쓰지 않는다면 삭제해도 됩니다.
-    """
-    total_count = 0
-    distribution = {}
-    
-    try:
-        # Connection Pool 사용
-        with get_db_connection_context() as conn:
-            if not conn:
-                return {}
-            cur = conn.cursor()
-
-            query = ""
-            total_count_query = ""
-            
-            if field_name == "birth_year":
-                current_year = datetime.datetime.now().year
-                total_count_query = "SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'birth_year' ~ '^[0-9]+$'"
-                query = f"""
-                    SELECT CASE
-                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 20 THEN '10대'
-                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 30 THEN '20대'
-                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 40 THEN '30대'
-                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 50 THEN '40대'
-                        WHEN ({current_year} - (structured_data->>'birth_year')::int) < 60 THEN '50대'
-                        ELSE '60대 이상'
-                    END as item, COUNT(*) as count
-                    FROM welcome_meta2
-                    WHERE structured_data->>'birth_year' ~ '^[0-9]+$'
-                    GROUP BY item ORDER BY item
-                """
-            else:
-                total_count_query = f"SELECT COUNT(*) FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL"
-                query = f"""
-                    SELECT structured_data->>'{field_name}' as item, COUNT(*) as count
-                    FROM welcome_meta2
-                    WHERE structured_data->>'{field_name}' IS NOT NULL
-                    GROUP BY item ORDER BY count DESC
-                """
-            
-            cur.execute(total_count_query)
-            total_count = cur.fetchone()[0]
-            
-            if total_count == 0:
-                cur.close()
-                return {}
-
-            cur.execute(query)
-            rows = cur.fetchall()
-            cur.close()
-        
-        distribution = {str(item): round((count / total_count) * 100, 1) for item, count in rows}
-        return distribution
-        
-    except Exception as e:
-        logging.error(f"DB 집계 실패 ({field_name}): {e}", exc_info=True)
-        return {}
-    finally:
-        pass # Context manager가 연결을 닫음
-
-
 def calculate_age_from_birth_year(birth_year, current_year: int = 2025) -> int:
     """출생연도로부터 나이 계산"""
     try:
@@ -186,10 +122,8 @@ def extract_field_values(data: List[Dict], field_name: str) -> List[Any]:
         raw_values = [item.get(field_name) for item in data if item.get(field_name)]
         for val in raw_values:
             if isinstance(val, list):
-                # 값이 리스트이면, 각 원소를 개별 값으로 추가
                 values.extend(val)
             elif val is not None:
-                # 리스트가 아니면 값을 그대로 추가
                 values.append(val)
 
     return [v for v in values if v is not None]
@@ -197,7 +131,6 @@ def extract_field_values(data: List[Dict], field_name: str) -> List[Any]:
 
 def get_panels_data_from_db(panel_id_list: List[str]) -> List[Dict]:
     """
-    [analysis.py에서 사용]
     panel_id 리스트로부터 패널 데이터 조회 (Connection Pool 사용)
     """
     if not panel_id_list:
@@ -224,7 +157,6 @@ def get_panels_data_from_db(panel_id_list: List[str]) -> List[Dict]:
             )
             rows = cur.fetchall()
             
-            # 정렬된 결과를 순서대로 추가
             for panel_id, structured_data in rows:
                 if isinstance(structured_data, dict):
                     panel = {'panel_id': panel_id}
