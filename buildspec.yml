@@ -35,13 +35,11 @@ phases:
       - sed -i "s/IMAGE_TAG_PLACEHOLDER/${COMMIT_HASH}/g" appspec.yml
       - cat appspec.yml
       
-      # 스크립트 파일들을 scripts 폴더로 복사
+      # 스크립트 파일 확인 및 권한 부여
       - echo "Preparing deployment scripts..."
-      - mkdir -p scripts
-      - cp install.sh scripts/
-      - cp start.sh scripts/
-      - cp stop.sh scripts/
+      - ls -la scripts/
       - chmod +x scripts/*.sh
+      - ls -la scripts/
 
 artifacts:
   files:
