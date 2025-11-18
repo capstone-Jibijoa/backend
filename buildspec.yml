@@ -1,23 +1,44 @@
 version: 0.2
 
+# 환경 변수 정의
+variables:
+  # ECR 레포지토리 이름 (빌드와 푸시 명령에서 사용)
+  ECR_REPO_NAME: jibijoa-backend
+  # ECR 전체 URI (Account ID와 Region은 CodeBuild 환경 변수에서 가져옴)
+  ECR_URI: 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/${ECR_REPO_NAME}
+
 phases:
   pre_build:
     commands:
+      # 1. 고유 태그 생성: CODEBUILD 변수에서 커밋 해시의 앞 7자리를 추출
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - echo "Setting IMAGE_TAG to: $COMMIT_HASH"
+      
+      # 2. ECR 로그인
       - echo Logging in to Amazon ECR...
       - aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com
-    variables:
-      # 커밋 ID의 앞 7자리를 고유 태그로 사용
-      IMAGE_TAG: ${CODEBUILD_RESOLVED_SOURCE_VERSION}
+      
   build:
     commands:
-      - echo Build Docker Image
-      - docker build -t jibijoa-backend:latest -t jibijoa-backend:$IMAGE_TAG .
-      - docker tag jibijoa-backend:latest 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
+      - echo Build Docker Image with multiple tags
+      
+      # 3. Docker 이미지 빌드 및 태그 지정 (전체 ECR URI 사용)
+      # ⚠️ ECR 태그 불변성 문제를 피하기 위해 'latest'는 이번에 사용하지 않거나, 별도 전략을 적용해야 합니다.
+      # 여기서는 고유 해시 태그만 우선 빌드합니다.
+      - docker build -t ${ECR_URI}:${COMMIT_HASH} .
+      
   post_build:
     commands:
       - echo Pushing image to ECR...
-      - docker push jibijoa-backend:$IMAGE_TAG
+      
+      # 4. 고유 태그를 ECR에 푸시 (latest 덮어쓰기 문제 회피)
+      - docker push ${ECR_URI}:${COMMIT_HASH}
+      
+      # 5. ECS 배포를 위해 이미지 정의 파일 생성 (CodePipeline에서 다음 단계로 전달)
+      - printf '[{"name":"fastapi-backend","imageUri":"%s"}]' ${ECR_URI}:${COMMIT_HASH} > imagedefinitions.json
+      - cat imagedefinitions.json
 
 artifacts:
   files:
-    - '**/*'
+    # ECS 배포 단계에서 필요한 파일 (imagedefinitions.json)
+    - imagedefinitions.json
