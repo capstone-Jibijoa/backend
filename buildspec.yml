@@ -5,15 +5,18 @@ phases:
     commands:
       - echo Logging in to Amazon ECR...
       - aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com
+    variables:
+      # 커밋 ID의 앞 7자리를 고유 태그로 사용
+      IMAGE_TAG: ${CODEBUILD_RESOLVED_SOURCE_VERSION}
   build:
     commands:
       - echo Build Docker Image
-      - docker build -t jibijoa-backend .
+      - docker build -t jibijoa-backend:latest -t jibijoa-backend:$IMAGE_TAG .
       - docker tag jibijoa-backend:latest 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
   post_build:
     commands:
       - echo Pushing image to ECR...
-      - docker push 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
+      - docker push jibijoa-backend:$IMAGE_TAG
 
 artifacts:
   files:
