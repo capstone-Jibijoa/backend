@@ -40,7 +40,8 @@ phases:
       - printf '[{"name":"fastapi-backend","imageUri":"%s"}]' ${ECR_URI}:${COMMIT_HASH} > imagedefinitions.json
       - cat imagedefinitions.json
 
-# 이 부분의 들여쓰기를 phases 레벨과 맞추세요.
 artifacts:
   files:
     - imagedefinitions.json
+```
+eof
