@@ -1,9 +1,10 @@
+import os
 import logging
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import PayloadSchemaType
 
 # Qdrant 서버 주소
-QDRANT_URL = "http://52.63.128.220:6333"
+QDRANT_URL = os.getenv("QDRANT_HOST")
 
 # 생성할 컬렉션 이름
 WELCOME_COLLECTION = "welcome_subjective_vectors"
