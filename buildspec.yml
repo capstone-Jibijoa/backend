@@ -22,27 +22,20 @@ phases:
     commands:
       # Docker 이미지 빌드
       - echo "Building Docker image..."
-      - docker build -t ${ECR_URI}:${COMMIT_HASH} .
+      - docker build -t ${ECR_URI}:${COMMIT_HASH} -t ${ECR_URI}:latest .
       
   post_build:
     commands:
-      # ECR 푸시
+      # ECR 푸시 (latest 태그 포함)
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
+      - docker push ${ECR_URI}:latest
       
-      # IMAGE_TAG를 파일로 저장 (루트 디렉토리)
-      - echo "Saving IMAGE_TAG to file..."
-      - echo "${COMMIT_HASH}" > IMAGE_TAG.txt
-      - cat IMAGE_TAG.txt
-      
-      # 스크립트 파일 확인 및 권한 부여
-      - echo "Preparing deployment scripts..."
-      - ls -la
-      - ls -la scripts/ 2>/dev/null || echo "scripts directory not found"
-      - chmod +x scripts/*.sh 2>/dev/null || true
+      # 배포 파일 확인
+      - echo "Deployment files:"
+      - ls -la scripts/
 
 artifacts:
   files:
     - appspec.yml
-    - IMAGE_TAG.txt
     - scripts/**/*
