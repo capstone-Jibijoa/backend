@@ -1,6 +1,7 @@
 import boto3
 import os
 from typing import Optional
+import anthropic
 
 # --- 1. Constants (AWS 설정 및 Secret Name) ---
 # Secrets Manager 접근에 필요한 비민감 정보
