@@ -13,8 +13,6 @@ variables:
 phases:
   pre_build:
     commands:
-      # 1. 고유 태그 생성: CODEBUILD 변수에서 커밋 해시의 앞 7자리를 추출하여 COMMIT_HASH 변수에 할당
-      # 이 변수를 사용하여 태그를 지정합니다.
       - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - echo "Setting COMMIT_HASH to: $COMMIT_HASH"
       
