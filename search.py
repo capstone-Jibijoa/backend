@@ -21,8 +21,9 @@ from search_helpers import (
     filter_negative_conditions,
     embed_keywords
 )
+import re
 from db import get_qdrant_client
-from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT
+from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES
 
 
 def hybrid_search(
@@ -49,7 +50,7 @@ def hybrid_search(
         final_limit = limit or classification.get('limit', 100)
         logging.info(f"  - 목표 인원: {final_limit}명")
 
-        # --- 사용자 요청에 따른 QPoll 키워드 분류 확인 및 변환 로직 추가 ---
+        # --- 사용자 요청에 따른 QPoll 키워드 분류 확인 및 답변 템플릿 기반 변환 로직 ---
         transformed_must_have_keywords = []
         transformed_preference_keywords = []
         transformed_negative_keywords = []
@@ -66,30 +67,38 @@ def hybrid_search(
                 mapping_info = get_field_mapping(keyword)
                 
                 final_keyword_for_embedding = keyword # 기본값은 원본 키워드
+                qpoll_field = None
 
                 if mapping_info and mapping_info.get("type") == "qpoll":
                     qpoll_field = mapping_info['field']
-                    final_keyword_for_embedding = QPOLL_FIELD_TO_TEXT[qpoll_field]
-                    logging.info(f"💡 키워드 '{keyword}'는 QPoll 주제로 사전 분류됨: "
-                                 f"'{final_keyword_for_embedding}'로 임베딩")
+                    logging.info(f"💡 키워드 '{keyword}'는 QPoll 주제로 사전 분류됨: '{qpoll_field}'")
                 else:
-                    logging.info(f"⚠️ 키워드 '{keyword}'는 QPoll 주제로 사전 분류되지 않음 (type: {mapping_info.get('type')}). LLM 분류 시도...")
+                    logging.info(f"⚠️ 키워드 '{keyword}'는 QPoll 주제로 사전 분류되지 않음. LLM 분류 시도...")
                     qpoll_field = classify_keyword_to_qpoll_topic(keyword)
+
+                if qpoll_field and qpoll_field in QPOLL_ANSWER_TEMPLATES:
+                    template = QPOLL_ANSWER_TEMPLATES[qpoll_field]
+                    # (으)로, (이)다 같은 문법적 부분을 제거
+                    cleaned_template = re.sub(r'\([가-힣]\)', '', template)
+                    # {answer_str}을 키워드로 교체
+                    final_sentence = cleaned_template.replace("{answer_str}", keyword)
+                    final_keyword_for_embedding = final_sentence
+                    logging.info(f"✅ 키워드 '{keyword}' -> QPoll 답변 문장으로 변환: '{final_sentence}'")
+                else:
                     if qpoll_field:
-                        final_keyword_for_embedding = QPOLL_FIELD_TO_TEXT[qpoll_field]
-                        logging.info(f"✅ LLM이 키워드 '{keyword}'를 QPoll 주제 '{qpoll_field}' ('{final_keyword_for_embedding}')로 분류했습니다. 이 문장으로 임베딩.")
+                        logging.warning(f"❌ QPoll 주제 '{qpoll_field}'에 대한 답변 템플릿을 찾을 수 없습니다. 원본 키워드로 임베딩.")
                     else:
                         logging.warning(f"❌ LLM도 키워드 '{keyword}'에 대한 QPoll 주제를 찾지 못했습니다. 원본 키워드로 임베딩.")
-                
+
                 transformed_list.append(final_keyword_for_embedding)
-            
+
             if category == "must_have":
                 transformed_must_have_keywords = transformed_list
             elif category == "preference":
                 transformed_preference_keywords = transformed_list
             elif category == "negative":
                 transformed_negative_keywords = transformed_list
-        
+
         # 원래 classification 객체를 업데이트
         classification['must_have_keywords'] = transformed_must_have_keywords
         classification['preference_keywords'] = transformed_preference_keywords
