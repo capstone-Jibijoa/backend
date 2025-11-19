@@ -107,123 +107,56 @@ class AnalysisResponse(BaseModel):
 
 def _prepare_display_fields(classification: Dict) -> List[Dict]:
     """
-    [v2] classification 결과로부터 테이블 헤더(display_fields)를 생성합니다.
-    - `objective_keywords`와 `mandatory_keywords`를 우선적으로 사용합니다.
-    - `get_field_mapping`을 호출하여 각 키워드에 맞는 필드와 설명을 찾습니다.
+    [v3] classification 결과로부터 테이블 헤더(display_fields)를 생성합니다.
+    - `structured_filters`와 `must_have`/`preference` 키워드를 우선적으로 사용합니다.
     """
     
-    objective_kws, must_have_kws, preference_kws = classification.get('objective_keywords', []), classification.get('must_have_keywords', []), classification.get('preference_keywords', [])
+    # structured_filters에서 필드명 추출
+    structured_fields = [f.get('field') for f in classification.get('structured_filters', []) if f.get('field')]
+    
+    must_have_kws = classification.get('must_have_keywords', [])
+    preference_kws = classification.get('preference_keywords', [])
+    
+    # 키워드 기반 필드 매핑
+    keyword_fields = []
+    for kw in must_have_kws + preference_kws:
+        mapping = get_field_mapping(kw)
+        if mapping and mapping.get('field') and mapping.get('field') != 'unknown':
+            keyword_fields.append(mapping.get('field'))
 
-    qpoll_keywords = []
-    other_must_have = []
-    other_preference = []
+    # 중복 제거 및 우선순위 부여 (구조화 필터 -> 키워드 필드)
+    header_fields = list(dict.fromkeys(structured_fields + keyword_fields))
     
-    for kw in must_have_kws:
-        mapping = get_field_mapping(kw)
-        if mapping and mapping.get('type') == 'qpoll':
-            qpoll_keywords.append(kw)
-        else:
-            other_must_have.append(kw)
-    
-    for kw in preference_kws:
-        mapping = get_field_mapping(kw)
-        if mapping and mapping.get('type') == 'qpoll':
-            if kw not in qpoll_keywords:
-                qpoll_keywords.append(kw)
-        else:
-            other_preference.append(kw)
-    
-    header_keywords = qpoll_keywords + other_must_have + other_preference + objective_kws
-    
-    if not header_keywords:
-        logging.warning("⚠️ _prepare_display_fields: 분석할 키워드가 없습니다. 빈 헤더 반환.")
+    if not header_fields:
+        logging.warning("⚠️ _prepare_display_fields: 분석할 필드가 없습니다. 빈 헤더 반환.")
         return []
-        
-    objective_field_counts = {}
-    for kw in objective_kws:
-        mapping = get_field_mapping(kw)
-        field = mapping.get('field')
-        if field and field != 'unknown':
-            if field not in objective_field_counts:
-                objective_field_counts[field] = 0
-            objective_field_counts[field] += 1
-    
-    ALWAYS_INCLUDE_FIELDS = {'gender', 'birth_year'}
-
-    single_value_fields_to_exclude = {field for field, count in objective_field_counts.items() 
-                                      if count == 1 and field not in ALWAYS_INCLUDE_FIELDS}
 
     unique_fields = {}
-    priority_counter = 0
-
-    for keyword in header_keywords:
+    for i, field in enumerate(header_fields):
         if len(unique_fields) >= 5:
             break
-
-        mapping = get_field_mapping(keyword)
-        field = mapping.get('field')
         
-        if keyword in objective_kws:
-            if field in single_value_fields_to_exclude:
-                continue
-
-        if field and field != 'unknown' and field not in unique_fields:
-            label = FIELD_NAME_MAP.get(field, mapping.get('description', field))
-            unique_fields[field] = {
-                'field': field,
+        # 'age' 필드는 UI에 'birth_year'로 표시해야 할 수 있으므로 변환
+        display_field = 'birth_year' if field == 'age' else field
+        
+        if display_field and display_field not in unique_fields:
+            label = FIELD_NAME_MAP.get(display_field, display_field)
+            unique_fields[display_field] = {
+                'field': display_field,
                 'label': label,
-                'priority': 0 if mapping.get('type') == 'qpoll' else priority_counter
+                'priority': i
             }
-            priority_counter += 1
 
+    # 컬럼 보강 로직 (필요시)
     if len(unique_fields) < 5:
-        
-        all_subjective_kws = must_have_kws + preference_kws
-        recommended_fields = []
-        
-        # 키워드와 연관된 필드 그룹 매핑
-        TOPIC_TO_RELATED_FIELDS = {
-            '여행': ['income_personal_monthly', 'family_size'],
-            '자동차': ['car_model_raw', 'car_manufacturer_raw'],
-            '직업': ['education_level', 'income_personal_monthly'],
-            '가족': ['marital_status', 'children_count'],
-            '소득': ['job_duty_raw', 'education_level']
-        }
-        
-        for topic, related_fields in TOPIC_TO_RELATED_FIELDS.items():
-            if any(topic in kw for kw in all_subjective_kws):
-                recommended_fields.extend(related_fields)
-        
-        if not recommended_fields:
-            recommended_fields = ['gender', 'birth_year', 'region_major']
-
-        fields_to_augment = list(dict.fromkeys(recommended_fields))
-        
-        for field_key in fields_to_augment:
+        ALWAYS_INCLUDE_FIELDS = ['gender', 'birth_year', 'job_title_raw', 'region_major']
+        for field_key in ALWAYS_INCLUDE_FIELDS:
             if len(unique_fields) >= 5: break
             if field_key not in unique_fields:
                 korean_name = FIELD_NAME_MAP.get(field_key, field_key)
                 unique_fields[field_key] = {
                     'field': field_key, 'label': korean_name, 'priority': 900 + len(unique_fields)
                 }
-
-    found_categories = classification.get('found_categories', [])
-    if found_categories and len(unique_fields) < 5:
-        for category in found_categories:
-            if len(unique_fields) >= 5:
-                break
-            
-            fields_to_add = VECTOR_CATEGORY_TO_FIELD.get(category, [])
-            for field in fields_to_add:
-                if len(unique_fields) >= 5:
-                    break
-                if field not in unique_fields:
-                    label = FIELD_NAME_MAP.get(field, field)
-                    unique_fields[field] = {
-                        'field': field, 
-                        'label': label, 
-                        'priority': 950 + len(unique_fields)
-                    }
 
     final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
     return final_result
@@ -294,7 +227,8 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     total_count = len(panel_id_list)
     log_search_query(query_text, total_count)
     
-    classification['ranked_keywords_raw'] = classification.get('objective_keywords', []) + classification.get('must_have_keywords', [])
+    # ranked_keywords_raw를 must_have와 preference 키워드로만 구성
+    classification['ranked_keywords_raw'] = classification.get('must_have_keywords', []) + classification.get('preference_keywords', [])
     display_fields = _prepare_display_fields(classification)
     
     if mode == "lite":
@@ -624,10 +558,15 @@ async def _get_qpoll_data(panel_id: str) -> Dict:
 
             if qpoll_results:
                 logging.info(f"✅ QPoll 응답 {len(qpoll_results)}개 발견")
-                for idx, point in enumerate(qpoll_results, 1):
+                text_to_field_map = {v: k for k, v in QPOLL_FIELD_TO_TEXT.items()}
+                for point in qpoll_results:
                     if point.payload:
-                        qpoll_data[f"qpoll_{idx:03d}_질문"] = point.payload.get("question", "")
-                        qpoll_data[f"qpoll_{idx:03d}_응답"] = point.payload.get("sentence", "")
+                        question = point.payload.get("question")
+                        sentence = point.payload.get("sentence")
+                        if question and sentence:
+                            field_key = text_to_field_map.get(question)
+                            if field_key:
+                                qpoll_data[field_key] = sentence
                 qpoll_data["qpoll_응답_개수"] = len(qpoll_results)
             else:
                 logging.warning("⚠️  QPoll 응답 없음")

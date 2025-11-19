@@ -12,7 +12,7 @@ import logging
 from typing import List, Set, Dict, Optional
 from qdrant_client import QdrantClient
 
-from llm import classify_query_keywords
+from llm import classify_query_keywords, classify_keyword_to_qpoll_topic
 from search_helpers import (
     search_welcome_objective,
     initialize_embeddings,
@@ -22,6 +22,7 @@ from search_helpers import (
     embed_keywords
 )
 from db import get_qdrant_client
+from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT
 
 
 def hybrid_search(
@@ -40,13 +41,61 @@ def hybrid_search(
     try:
         classification = classify_query_keywords(query)
         logging.info(f"✅ 분류 완료:")
-        logging.info(f"  - Objective: {classification['objective_keywords']}")
+        logging.info(f"  - Structured Filters: {classification.get('structured_filters')}")
         logging.info(f"  - Must-have: {classification['must_have_keywords']}")
         logging.info(f"  - Preference: {classification['preference_keywords']}")
         logging.info(f"  - Negative: {classification['negative_keywords']}")
         
         final_limit = limit or classification.get('limit', 100)
         logging.info(f"  - 목표 인원: {final_limit}명")
+
+        # --- 사용자 요청에 따른 QPoll 키워드 분류 확인 및 변환 로직 추가 ---
+        transformed_must_have_keywords = []
+        transformed_preference_keywords = []
+        transformed_negative_keywords = []
+
+        all_keywords_categories = {
+            "must_have": classification['must_have_keywords'],
+            "preference": classification['preference_keywords'],
+            "negative": classification['negative_keywords']
+        }
+
+        for category, keywords_list in all_keywords_categories.items():
+            transformed_list = []
+            for keyword in keywords_list:
+                mapping_info = get_field_mapping(keyword)
+                
+                final_keyword_for_embedding = keyword # 기본값은 원본 키워드
+
+                if mapping_info and mapping_info.get("type") == "qpoll":
+                    qpoll_field = mapping_info['field']
+                    final_keyword_for_embedding = QPOLL_FIELD_TO_TEXT[qpoll_field]
+                    logging.info(f"💡 키워드 '{keyword}'는 QPoll 주제로 사전 분류됨: "
+                                 f"'{final_keyword_for_embedding}'로 임베딩")
+                else:
+                    logging.info(f"⚠️ 키워드 '{keyword}'는 QPoll 주제로 사전 분류되지 않음 (type: {mapping_info.get('type')}). LLM 분류 시도...")
+                    qpoll_field = classify_keyword_to_qpoll_topic(keyword)
+                    if qpoll_field:
+                        final_keyword_for_embedding = QPOLL_FIELD_TO_TEXT[qpoll_field]
+                        logging.info(f"✅ LLM이 키워드 '{keyword}'를 QPoll 주제 '{qpoll_field}' ('{final_keyword_for_embedding}')로 분류했습니다. 이 문장으로 임베딩.")
+                    else:
+                        logging.warning(f"❌ LLM도 키워드 '{keyword}'에 대한 QPoll 주제를 찾지 못했습니다. 원본 키워드로 임베딩.")
+                
+                transformed_list.append(final_keyword_for_embedding)
+            
+            if category == "must_have":
+                transformed_must_have_keywords = transformed_list
+            elif category == "preference":
+                transformed_preference_keywords = transformed_list
+            elif category == "negative":
+                transformed_negative_keywords = transformed_list
+        
+        # 원래 classification 객체를 업데이트
+        classification['must_have_keywords'] = transformed_must_have_keywords
+        classification['preference_keywords'] = transformed_preference_keywords
+        classification['negative_keywords'] = transformed_negative_keywords
+        # --- QPoll 키워드 분류 확인 및 변환 로직 끝 ---
+
     except Exception as e:
         logging.error(f"❌ LLM 분류 실패: {e}")
         return {
@@ -84,29 +133,28 @@ def hybrid_search(
                 "classification": classification
             }
 
-    logging.info("\n[Stage 1] PostgreSQL Objective 필터링")
+    logging.info("\n[Stage 1] PostgreSQL Structured 필터링")
     
-    objective_keywords = classification['objective_keywords']
+    structured_filters = classification.get('structured_filters', [])
     stage1_ids = set()
     
-    if objective_keywords:
-        # Welcome objective 검색
+    if structured_filters:
         if use_welcome:
             welcome_ids, _ = search_welcome_objective(
-                keywords=objective_keywords,
-                attempt_name="객관식(Stage1)"
+                filters=structured_filters,
+                attempt_name="구조화(Stage1)"
             )
             stage1_ids = welcome_ids
-            logging.info(f"   Welcome 객관식: {len(welcome_ids):,}명")
+            logging.info(f"   Welcome 구조화 필터: {len(welcome_ids):,}명")
         
     else:
-        logging.info("   Objective 키워드 없음 - Stage 1 스킵")
-        stage1_ids = None # Objective가 없으면 전체 pool에서 검색 (속도 저하)
+        logging.info("   구조화 필터 없음 - Stage 1 스킵")
+        stage1_ids = None
     
     if stage1_ids is not None:
-        logging.info(f"✅ Stage 1 완료: {len(stage1_ids):,}명 (Demographic 필터링)")
+        logging.info(f"✅ Stage 1 완료: {len(stage1_ids):,}명 (Structured 필터링)")
     else:
-        logging.info(f"⚠️  Stage 1: Objective 없음 - 전체 검색 모드")
+        logging.info(f"⚠️  Stage 1: 구조화 필터 없음 - 전체 검색 모드")
 
     logging.info("\n[Stage 2] Must-have 조건 엄격 검증")
     
@@ -115,38 +163,55 @@ def hybrid_search(
     
     if must_have_keywords:
         must_have_vectors = embed_keywords(must_have_keywords, embeddings)
-        welcome_must_have = set()
-        if use_welcome:
-            welcome_must_have = search_must_have_conditions(
-                must_have_keywords=must_have_keywords,
-                query_vectors=must_have_vectors,
-                qdrant_client=qdrant_client,
-                collection_name="welcome_subjective_vectors",
-                pre_filtered_panel_ids=stage1_ids,
-                threshold=0.53,  
-                hnsw_ef=128
-            )
-            logging.info(f"   Welcome Must-have: {len(welcome_must_have):,}명")
         
-        qpoll_must_have = set()
-        if use_qpoll:
-            qpoll_must_have = search_must_have_conditions(
-                must_have_keywords=must_have_keywords,
-                query_vectors=must_have_vectors,
-                qdrant_client=qdrant_client,
-                collection_name="qpoll_vectors_v2",
-                pre_filtered_panel_ids=stage1_ids,
-                threshold=0.50,
-                hnsw_ef=128
-            )
-            logging.info(f"   QPoll Must-have: {len(qpoll_must_have):,}명")
-        
-        stage2_ids = welcome_must_have | qpoll_must_have # OR
-        
+        per_keyword_results = []
+        for i, (keyword, vector) in enumerate(zip(must_have_keywords, must_have_vectors)):
+            logging.info(f"   🔍 Must-have [{i+1}/{len(must_have_keywords)}]: '{keyword}' 검색")
+            
+            single_keyword_list = [keyword]
+            single_vector_list = [vector]
+
+            welcome_matches = set()
+            if use_welcome:
+                welcome_matches = search_must_have_conditions(
+                    must_have_keywords=single_keyword_list,
+                    query_vectors=single_vector_list,
+                    qdrant_client=qdrant_client,
+                    collection_name="welcome_subjective_vectors",
+                    pre_filtered_panel_ids=stage1_ids,
+                    threshold=0.53,
+                    hnsw_ef=128
+                )
+
+            qpoll_matches = set()
+            if use_qpoll:
+                qpoll_matches = search_must_have_conditions(
+                    must_have_keywords=single_keyword_list,
+                    query_vectors=single_vector_list,
+                    qdrant_client=qdrant_client,
+                    collection_name="qpoll_vectors_v2",
+                    pre_filtered_panel_ids=stage1_ids,
+                    threshold=0.50,
+                    hnsw_ef=128
+                )
+            
+            keyword_total_matches = welcome_matches | qpoll_matches
+            per_keyword_results.append(keyword_total_matches)
+            logging.info(f"      → '{keyword}' 조건 일치: {len(keyword_total_matches):,}명 (Welcome 또는 QPoll)")
+
+        if per_keyword_results:
+            final_must_have_ids = per_keyword_results[0]
+            for other_result in per_keyword_results[1:]:
+                final_must_have_ids &= other_result
+            
+            stage2_ids = final_must_have_ids
+        else:
+            stage2_ids = set()
+
         if stage1_ids is not None:
-            stage2_ids &= stage1_ids # AND
+             stage2_ids &= stage1_ids
         
-        logging.info(f"✅ Stage 2 완료: {len(stage2_ids):,}명 (Must-have AND 검증)")
+        logging.info(f"✅ Stage 2 완료: {len(stage2_ids):,}명 (모든 Must-have 조건 교집합)")
         
         min_threshold = max(10, int(final_limit * 0.2))
         if must_have_keywords and len(stage2_ids) < min_threshold:
@@ -198,7 +263,7 @@ def hybrid_search(
                 threshold=0.38,
                 top_k_per_keyword=500
             )
-            all_found_categories.extend(qpoll_categories) # 이제 정상 동작
+            all_found_categories.extend(qpoll_categories)
             logging.info(f"   QPoll Preference: {len(qpoll_scored)}명 스코어링")
         
         max_scores = {}
@@ -217,8 +282,7 @@ def hybrid_search(
 
         logging.info(f"✅ Stage 3 완료: {len(stage3_scored):,}명 (Preference 스코어링)")
     else:
-        # Preference 없으면 Stage 2 결과 그대로
-        stage3_scored = [(pid, 0.0) for pid in stage2_ids]
+        stage3_scored = [(pid, 0.0) for pid in stage2_ids] if stage2_ids else []
         logging.info("   Preference 키워드 없음 - Stage 3 스킵")
 
     logging.info("\n[Stage 4] Negative 조건 제거")
@@ -226,7 +290,7 @@ def hybrid_search(
     negative_keywords = classification['negative_keywords']
     stage4_ids = {pid for pid, _ in stage3_scored}
     
-    if negative_keywords:
+    if negative_keywords and stage4_ids:
         negative_vectors = embed_keywords(negative_keywords, embeddings)
         
         if use_welcome:
@@ -242,7 +306,7 @@ def hybrid_search(
         stage3_scored = [(pid, score) for pid, score in stage3_scored if pid in stage4_ids]
         logging.info(f"✅ Stage 4 완료: {len(stage4_ids):,}명 (Negative 제거)")
     else:
-        logging.info("   Negative 키워드 없음 - Stage 4 스킵")
+        logging.info("   Negative 키워드 없음 또는 대상 없음 - Stage 4 스킵")
 
     logging.info("\n[최종 결과 정리]")
     
@@ -261,7 +325,7 @@ def hybrid_search(
     }
 
     logging.info(f"✅ 최종 결과: {len(final_panel_ids):,}명 (목표: {final_limit}명)")
-    logging.info(f"   Stage 1 (Objective): {result['stage_details']['stage1_objective']:,}명")
+    logging.info(f"   Stage 1 (Structured): {result['stage_details']['stage1_objective']:,}명")
     logging.info(f"   Stage 2 (Must-have): {result['stage_details']['stage2_must_have']:,}명")
     logging.info(f"   Stage 3 (Preference): {result['stage_details']['stage3_preference']:,}명")
     logging.info(f"   Stage 4 (Negative): {result['stage_details']['stage4_negative']:,}명")

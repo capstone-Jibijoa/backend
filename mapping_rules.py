@@ -336,3 +336,11 @@ def get_field_mapping(keyword: str) -> Optional[Dict[str, Any]]:
         "description": keyword, 
         "type": "unknown"
     }
+
+# Q-Poll 주제 ID와 문장 생성 템플릿 매핑
+# 사용자가 이 부분을 직접 채워넣을 예정입니다.
+QPOLL_SENTENCE_TEMPLATES = {
+    "physical_activity": "저는 평소 체력 관리를 위해 {} 활동을 하고 있습니다.",
+    # 나머지 Q-Poll 주제에 대한 문장 템플릿을 여기에 추가해주세요.
+    # 예시: "ott_count": "저는 현재 {} OTT 서비스를 이용하고 있습니다.",
+}

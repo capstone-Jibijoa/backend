@@ -33,152 +33,108 @@ def initialize_embeddings():
                 )
     return EMBEDDINGS
 
-class ConditionBuilder:
-    """SQL 조건 빌더"""
-    def __init__(self):
-        self.conditions = []
-        self.params = []
-        self.grouped_conditions = {}
+def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
+    """
+    LLM이 생성한 structured_filters를 기반으로 SQL WHERE 절과 파라미터를 동적으로 생성합니다.
+    'age' 필드를 'birth_year' 기반의 실시간 나이 계산으로 변환하는 로직을 포함합니다.
+    """
+    if not filters:
+        return "", []
 
-    def add_condition(self, keyword: str, field: str):
-        if field not in self.grouped_conditions:
-            self.grouped_conditions[field] = []
+    conditions = []
+    params = []
+    CURRENT_YEAR = datetime.now().year
 
-        if field == 'gender':
-            if keyword in ['남', '남자', '남성']: 
-                self.grouped_conditions[field].append('M')
-            elif keyword in ['여', '여자', '여성']: 
-                self.grouped_conditions[field].append('F')
-        
-        elif field == 'birth_year':
-            birth_start, birth_end = None, None
-            if '~' in keyword:
-                parts = keyword.replace('대', '').split('~')
-                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-                    age_start, age_end = int(parts[0]), int(parts[1])
-                    birth_start, birth_end = CURRENT_YEAR - age_end - 9, CURRENT_YEAR - age_start
-            elif '이상' in keyword:
-                match = re.search(r'(\d+)대\s*이상', keyword)
-                if match:
-                    age_start = int(match.group(1))
-                    birth_start, birth_end = 0, CURRENT_YEAR - age_start
-            elif keyword.endswith('대') and keyword[:-1].isdigit():
-                age_prefix = int(keyword[:-1])
-                birth_start, birth_end = CURRENT_YEAR - age_prefix - 9, CURRENT_YEAR - age_prefix
-            
-            if birth_start is not None:
-                self.grouped_conditions[field].append((birth_start, birth_end))
-        
-        elif field in ['job_duty_raw', 'job_title_raw', 'car_model_raw']:
-            self.grouped_conditions[field].append(f'%{keyword}%')
-        
-        else:
-            self.grouped_conditions[field].append(keyword)
+    for f in filters:
+        field = f.get("field")
+        operator = f.get("operator")
+        value = f.get("value")
 
-    def finalize(self) -> Tuple[str, List]:
-        final_conditions = []
-        final_params = []
+        if not field or not operator:
+            continue
 
-        for field, values in self.grouped_conditions.items():
-            if not values: 
-                continue
+        # 'age' 필드를 'birth_year' 계산으로 특별 처리
+        if field == "age":
+            # 나이 필드는 연산자가 'between'일 것으로 가정
+            if operator == "between" and isinstance(value, list) and len(value) == 2:
+                age_start, age_end = value
+                # 나이를 출생년도 범위로 변환
+                birth_year_end = CURRENT_YEAR - age_start
+                birth_year_start = CURRENT_YEAR - age_end
+                
+                conditions.append(f"(structured_data->>'birth_year')::int BETWEEN %s AND %s")
+                params.extend([birth_year_start, birth_year_end])
+            continue
 
-            if field == 'birth_year':
-                conds = []
-                for start, end in values:
-                    conds.append(f"(structured_data->>'birth_year' ~ '^[0-9]+$' AND (structured_data->>'birth_year')::int BETWEEN %s AND %s)")
-                    final_params.extend([start, end])
-                if conds: 
-                    final_conditions.append(f"({' OR '.join(conds)})")
-            
-            elif field in ['job_duty_raw', 'job_title_raw', 'car_model_raw']:
-                conds = [f"(structured_data->>'{field}' ILIKE %s)" for _ in values]
-                final_params.extend(values)
-                if conds: 
-                    final_conditions.append(f"({' AND '.join(conds)})")
+        # 다른 일반 필드 처리
+        field_sql = f"(structured_data->>'{field}')"
+        # 숫자형일 수 있는 다른 필드들 처리
+        if field in ['income_personal_monthly', 'family_size', 'children_count']:
+             field_sql = f"({field_sql}::numeric)"
 
-            else:
-                placeholders = ','.join(['%s'] * len(values))
-                final_conditions.append(f"(structured_data->>'{field}' IN ({placeholders}))")
-                final_params.extend(values)
+        if operator == "eq":
+            conditions.append(f"{field_sql} = %s")
+            params.append(value)
+        elif operator == "in" and isinstance(value, list) and value:
+            placeholders = ','.join(['%s'] * len(value))
+            conditions.append(f"{field_sql} IN ({placeholders})")
+            params.extend(value)
+        elif operator == "between" and isinstance(value, list) and len(value) == 2:
+            conditions.append(f"{field_sql} BETWEEN %s AND %s")
+            params.extend(value)
+        elif operator == "like":
+            conditions.append(f"{field_sql} ILIKE %s")
+            params.append(f"%{value}%")
+        elif operator == "gte":
+            conditions.append(f"{field_sql} >= %s")
+            params.append(value)
+        elif operator == "lte":
+            conditions.append(f"{field_sql} <= %s")
+            params.append(value)
 
-        if not final_conditions: 
-            return "", []
-        
-        where_clause = " WHERE " + " AND ".join(final_conditions)
-        return where_clause, final_params
+    if not conditions:
+        return "", []
 
-
-def _map_keywords_to_fields(keywords: List[str]) -> Tuple[Dict[str, Set[str]], Set[str]]:
-    """키워드를 확장하고 필드에 매핑"""
-    expanded_keywords_map = defaultdict(set)
-    used_original_keywords = set()
-
-    for original_kw in keywords:
-        expanded_kws = CATEGORY_MAPPING.get(original_kw, [original_kw])
-        
-        for expanded_kw in expanded_kws:
-            mapping = get_field_mapping(expanded_kw)
-            
-            if mapping and mapping.get('type') == 'filter' and mapping.get('field') != 'unknown':
-                field = mapping['field']
-                expanded_keywords_map[field].add(expanded_kw)
-                used_original_keywords.add(original_kw)
-
-    return expanded_keywords_map, used_original_keywords
-
-
-def build_welcome_query_conditions(keywords: List[str]) -> Tuple[str, List, Set[str]]:
-    """키워드 리스트를 분석하여 SQL WHERE 절 생성"""
-    builder = ConditionBuilder()
-    
-    expanded_keywords_map, used_original_keywords = _map_keywords_to_fields(keywords)
-
-    for field, kws in expanded_keywords_map.items():
-        for kw in kws:
-            builder.add_condition(kw, field)
-
-    where_clause, params = builder.finalize()
-    unhandled_keywords = set(keywords) - used_original_keywords
-    return where_clause, params, unhandled_keywords
+    where_clause = " WHERE " + " AND ".join(conditions)
+    return where_clause, params
 
 
 def search_welcome_objective(
-    keywords: List[str],
-    attempt_name: str = "객관식"
+    filters: List[Dict],
+    attempt_name: str = "구조화"
 ) -> Tuple[Set[str], Set[str]]:
     """
-    Stage 1: PostgreSQL로 Objective (demographic) 필터링
+    Stage 1: LLM이 생성한 구조화된 필터(structured_filters)를 사용하여 PostgreSQL에서 필터링합니다.
     """
-    if not keywords:
-        logging.info(f"   Welcome {attempt_name}: 키워드 없음")
+    if not filters:
+        logging.info(f"   Welcome {attempt_name}: 필터 없음")
         return set(), set()
-    
+
     try:
         with get_db_connection_context() as conn:
             if not conn:
                 logging.error(f"   Welcome {attempt_name}: DB 연결 실패")
                 return set(), set()
-            
+
             cur = conn.cursor()
-            where_clause, params, unhandled = build_welcome_query_conditions(keywords)
-            
+            where_clause, params = build_sql_from_structured_filters(filters)
+
             if not where_clause:
-                logging.info(f"   Welcome {attempt_name}: 조건 없음")
+                logging.info(f"   Welcome {attempt_name}: 유효한 SQL 조건 없음")
                 cur.close()
-                return set(), unhandled
-            
+                return set(), set()
+
             query = f"SELECT panel_id FROM welcome_meta2 {where_clause}"
             
             cur.execute(query, tuple(params))
             results = {str(row[0]) for row in cur.fetchall()}
             cur.close()
-        
-        return results, unhandled
-    
+
+        return results, set() # unhandled_keywords는 더 이상 사용하지 않으므로 빈 set 반환
+
     except Exception as e:
         logging.error(f"   Welcome {attempt_name} 검색 실패: {e}", exc_info=True)
-        return set(), set(keywords)
+        return set(), set()
 
 
 def search_must_have_conditions(
