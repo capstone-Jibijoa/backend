@@ -68,5 +68,5 @@ USER appuser
 # 2.6 포트 노출
 EXPOSE 8000
 
-# 2.7 실행 명령어
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 2.7 실행 명령어 (절대 경로 지정)
+CMD ["/venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
