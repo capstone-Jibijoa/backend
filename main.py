@@ -6,9 +6,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Tuple, Dict, List
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
-from fastapi_cache.decorator import cache
+# from fastapi_cache import FastAPICache
+# from fastapi_cache.backends.inmemory import InMemoryBackend
+# from fastapi_cache.decorator import cache
 
 from llm import classify_query_keywords
 from search import initialize_embeddings
