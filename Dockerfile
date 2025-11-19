@@ -29,6 +29,7 @@ COPY requirements.txt .
 # 빌드 시에만 필요한 툴과 의존성을 설치
 RUN pip install --upgrade pip setuptools wheel && \
     pip install --no-cache-dir --prefix=/venv -r requirements.txt
+RUN ls /venv/bin | grep uvicorn
 
 # --------------------
 # 2. 프로덕션 스테이지 (Production Stage)
