@@ -44,8 +44,10 @@ RUN apt-get update && \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 2.3 비-루트 사용자 생성
-RUN adduser --system --no-create-home appuser
+# 2.3 비-루트 사용자 생성 및 홈 디렉토리 설정
+RUN adduser --system --home /home/appuser appuser && \
+    mkdir -p /home/appuser/.cache/huggingface && \
+    chown -R appuser /home/appuser
 
 # 2.4 작업 디렉토리의 소유권 변경
 RUN chown -R appuser /app
@@ -56,7 +58,9 @@ COPY --from=builder /venv /venv
 # 2.6 환경 변수 설정
 ENV PATH="/venv/bin:$PATH" \
     PYTHONPATH="/app" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE="/home/appuser/.cache/huggingface" \
+    HF_HOME="/home/appuser/.cache/huggingface"
 
 # 2.7 애플리케이션 코드 복사
 COPY --chown=appuser . .
