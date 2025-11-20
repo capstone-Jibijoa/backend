@@ -490,7 +490,7 @@ async def search_panels(search_query: SearchQuery):
 
 
 @app.post("/api/search-and-analyze")
-@cache(expire=600) # 10분 동안 캐시
+# @cache(expire=600) # 10분 동안 캐시
 async def search_and_analyze(request: AnalysisRequest):
     """
     📊 Pro 모드: 검색 + 인사이트 분석 (차트 + 테이블 데이터 반환)
