@@ -1,16 +1,12 @@
 import boto3
 import os
+import json
 from typing import Optional
-import anthropic
 
 # -- 1. Constants (AWS 설정 및 Secret Name) ---
-# Secrets Manager 접근에 필요한 비민감 정보
-# 이 값들은 docker-compose.yml 파일의 environment 섹션에서 주입됩니다.
-AWS_REGION = os.environ.get("DEFAULT_REGION", "ap-southeast-2") # 리전 환경 변수를 사용하거나 기본값 설정
-# Secrets Manager에 저장한 비밀 이름 (실제 저장한 이름으로 대체해야 합니다)
-DB_PASSWORD_SECRET_NAME = "DB_PASSWORD" 
-ANTHROPIC_KEY_SECRET_NAME = "ANTHROPIC_API_KEY"
-
+AWS_REGION = os.environ.get("DEFAULT_REGION", "ap-southeast-2")
+# 하나의 Secret에 모든 값이 JSON 형태로 저장되어 있음
+SECRET_NAME = os.environ.get("APP_SECRET_CONFIG_NAME", "prod/backend/secrets")
 
 # -- 2. Secrets Manager 로드 함수 ---
 
@@ -21,7 +17,6 @@ def get_secrets_client():
     global secrets_client
     if secrets_client is None:
         try:
-            # EC2 인스턴스에 연결된 IAM Role 권한을 사용
             secrets_client = boto3.client('secretsmanager', region_name=AWS_REGION)
         except Exception as e:
             print(f"Boto3 Secrets Manager Client 초기화 실패: {e}")
@@ -29,24 +24,25 @@ def get_secrets_client():
     return secrets_client
 
 
-def get_single_secret_value(secret_name: str) -> str:
-    """Secrets Manager에서 단일 비밀 값을 가져와 문자열로 반환"""
+def get_secrets_from_manager() -> dict:
+    """Secrets Manager에서 JSON 형태의 비밀 값을 가져와 딕셔너리로 반환"""
     client = get_secrets_client()
     
-    if not secret_name:
-        raise ValueError(f"비밀 이름 ({secret_name})이 설정되지 않았습니다.")
+    if not SECRET_NAME:
+        raise ValueError(f"비밀 이름이 설정되지 않았습니다.")
 
     try:
-        response = client.get_secret_value(SecretId=secret_name)
+        response = client.get_secret_value(SecretId=SECRET_NAME)
         
         if 'SecretString' in response:
-            # SecretString이 JSON이 아닌 일반 문자열이라고 가정 (DB 비밀번호, API Key)
-            return response['SecretString']
+            # JSON 형태의 SecretString을 파싱
+            return json.loads(response['SecretString'])
         else:
-            raise TypeError(f"Secret {secret_name}의 값이 SecretString 형태가 아닙니다.")
+            raise TypeError(f"Secret {SECRET_NAME}의 값이 SecretString 형태가 아닙니다.")
 
     except Exception as e:
-        print(f"Secrets Manager 호출 실패 (Secret Name: {secret_name}). IAM 권한 및 ARN 확인 필요.")
+        print(f"Secrets Manager 호출 실패 (Secret Name: {SECRET_NAME}). IAM 권한 및 ARN 확인 필요.")
+        print(f"에러 상세: {e}")
         raise RuntimeError(f"애플리케이션 시작에 필요한 비밀 정보를 로드하지 못했습니다: {e}")
 
 
@@ -57,10 +53,10 @@ class Settings:
     DB_HOST: str = os.environ.get("DB_HOST", "localhost")
     DB_NAME: str = os.environ.get("DB_NAME", "default_db")
     DB_USER: str = os.environ.get("DB_USER", "postgres")
-    PORT: int = int(os.environ.get("PORT", 8000)) # 문자열을 정수로 변환
+    PORT: int = int(os.environ.get("PORT", 5432))
 
     QDRANT_HOST: str = os.environ.get("QDRANT_HOST", "localhost")
-    QDRANT_PORT: int = int(os.environ.get("QDRANT_PORT", 6333)) # 문자열을 정수로 변환
+    QDRANT_PORT: int = int(os.environ.get("QDRANT_PORT", 6333))
     QDRANT_COLLECTION_WELCOME_NAME: str = os.environ.get("QDRANT_COLLECTION_WELCOME_NAME", "welcome")
     QDRANT_COLLECTION_QPOLL_NAME: str = os.environ.get("QDRANT_COLLECTION_QPOLL_NAME", "qpoll")
 
@@ -72,11 +68,32 @@ class Settings:
     def load_secrets(self):
         """Secrets Manager에서 민감한 비밀 정보를 로드하여 클래스 속성에 할당"""
         
-        # DB 비밀번호 로드
-        self.DB_PASSWORD = get_single_secret_value(DB_PASSWORD_SECRET_NAME)
+        # 환경변수에 이미 값이 있으면 Secrets Manager 호출 건너뛰기 (로컬 개발용)
+        if os.environ.get("DB_PASSWORD"):
+            print("환경변수에서 DB_PASSWORD 로드")
+            self.DB_PASSWORD = os.environ.get("DB_PASSWORD")
+            self.ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+            return
         
-        # Anthropic API 키 로드
-        self.ANTHROPIC_API_KEY = get_single_secret_value(ANTHROPIC_KEY_SECRET_NAME)
+        # Secrets Manager에서 JSON 형태로 모든 비밀 로드
+        try:
+            secrets = get_secrets_from_manager()
+            
+            # JSON에서 개별 값 추출
+            self.DB_PASSWORD = secrets.get("DB_PASSWORD")
+            self.ANTHROPIC_API_KEY = secrets.get("ANTHROPIC_API_KEY")
+            
+            # 필수 값 검증
+            if not self.DB_PASSWORD:
+                raise ValueError("DB_PASSWORD가 Secrets Manager에 없습니다.")
+            if not self.ANTHROPIC_API_KEY:
+                raise ValueError("ANTHROPIC_API_KEY가 Secrets Manager에 없습니다.")
+                
+            print("Secrets Manager에서 비밀 정보 로드 성공")
+            
+        except Exception as e:
+            print(f"Secrets Manager 로드 실패: {e}")
+            raise
 
 
 # -- 4. 전역 인스턴스 생성 및 로드 (Import 시 1회 실행) ---
@@ -88,4 +105,4 @@ try:
 except RuntimeError as e:
     # 비밀 로드 실패 시 애플리케이션 시작을 막습니다.
     print("FATAL: 핵심 비밀 정보 로드 실패. 인프라 설정(IAM/Secrets Manager)을 확인하세요.")
-    raise # 예외 발생
+    raise
