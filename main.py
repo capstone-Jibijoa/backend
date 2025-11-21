@@ -2,19 +2,24 @@ import os
 import json
 import time
 import logging
+import re
 from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
 from pydantic import BaseModel
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Callable, Awaitable, Any
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
+from fastapi.responses import Response
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.inmemory import InMemoryBackend
 from fastapi_cache.decorator import cache
 
-from llm import classify_query_keywords
-from search import initialize_embeddings
+from llm import parse_query_intelligent
+from search_helpers import initialize_embeddings
 from search import hybrid_search as hybrid_search
 import asyncio
-from mapping_rules import QPOLL_FIELD_TO_TEXT, VECTOR_CATEGORY_TO_FIELD
+# [수정] 필요한 매핑 룰 추가 import
+from mapping_rules import QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES, VECTOR_CATEGORY_TO_FIELD
 from insights import (
     analyze_search_results_optimized as analyze_search_results,
     get_field_mapping
@@ -29,23 +34,15 @@ from db import (
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny
 from utils import FIELD_NAME_MAP
 
-# 루트 로거 설정
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    datefmt='%Y-%m-%d %H:%M:%S')
-
-# Uvicorn, FastAPI 등 라이브러리 로거 레벨 설정 (필요시)
-logging.getLogger("uvicorn").setLevel(logging.WARNING)
-logging.getLogger("fastapi").setLevel(logging.WARNING)
-# --- 로깅 설정 ---
+load_dotenv()
 
 app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
 
+# --- CORS Middleware ---
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -54,27 +51,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- [Helper 1] 텍스트 자르기 ---
+def truncate_text(value: Any, max_length: int = 30) -> str:
+    if value is None: return ""
+    if isinstance(value, list):
+        text = ", ".join(map(str, value))
+    else:
+        text = str(value)
+    if len(text) > max_length:
+        return text[:max_length] + "..."
+    return text
+
+# --- [Helper 2] 템플릿 기반 핵심 답변 추출 (테이블용) ---
+def extract_answer_from_template(field_name: str, sentence: str) -> str:
+    """
+    QPOLL_ANSWER_TEMPLATES를 역이용하여 문장에서 핵심 답변(answer_str)만 추출합니다.
+    """
+    if not sentence: return ""
+    
+    # 1. 특수 필드 처리
+    if field_name == "ott_count":
+        match = re.search(r'(\d+개|이용 안 함|없음)', sentence)
+        if match: return match.group(1)
+    elif field_name == "skincare_spending":
+        match = re.search(r'(\d+만\s*원|\d+~\d+만\s*원|\d+원)', sentence)
+        if match: return match.group(1)
+
+    # 2. 템플릿 기반 동적 추출
+    template = QPOLL_ANSWER_TEMPLATES.get(field_name)
+    if template:
+        try:
+            # 템플릿을 정규식 패턴으로 변환
+            pattern_str = re.escape(template)
+            pattern_str = pattern_str.replace(re.escape("{answer_str}"), r"(.*?)")
+            
+            # 한국어 조사 유연성 처리
+            pattern_str = pattern_str.replace(r"\(이\)다", r"(?:이)?다")
+            pattern_str = pattern_str.replace(r"\(으\)로", r"(?:으)?로")
+            pattern_str = pattern_str.replace(r"\(가\)", r"(?:가)?")
+            pattern_str = pattern_str.replace(r"\ ", r"\s*")
+
+            match = re.search(pattern_str, sentence)
+            if match:
+                extracted = match.group(1)
+                # 괄호 등 잔여물 제거
+                cleaned = re.sub(r'\([^)]*\)', '', extracted).strip()
+                return truncate_text(cleaned, 20) # 테이블용이므로 짧게
+        except:
+            pass
+
+    # 3. 실패 시 기본 truncate
+    # 괄호 제거 후 반환
+    cleaned = re.sub(r'\([^)]*\)', '', str(sentence)).strip()
+    return truncate_text(cleaned, 30)
+
+# --- Caching Setup ---
+def custom_key_builder(
+    func: Callable[..., Awaitable[Any]],
+    namespace: str = "",
+    *, 
+    request: Request = None,
+    response: Response = None,
+    **kwargs: Any,
+) -> str:
+    if request:
+        sorted_query_params = sorted(request.query_params.items())
+        return ":".join([
+            namespace,
+            request.method.lower(),
+            request.url.path,
+            repr(sorted_query_params),
+            func.__module__ + func.__name__,
+        ])
+    return ":".join([
+        namespace,
+        func.__module__ + func.__name__,
+        repr(sorted(kwargs.items()))
+    ])
+
+# --- Model Preloading ---
 def preload_models():
-    """애플리케이션 시작 시 모든 AI 모델을 미리 로드합니다."""
+    import time
+    from semantic_router import router
     logging.info("="*70)
     logging.info("🔄 모든 AI 모델을 미리 로드합니다...")
+    start = time.time()
     initialize_embeddings()
-    classify_query_keywords("모델 로딩 테스트")
     try:
-        classify_query_keywords("모델 로딩 테스트")
-        logging.info("✅ Claude (LLM) 모델 연결 확인 완료.")
-    except Exception as e:
-        logging.warning(f"⚠️  Claude (LLM) 모델 연결 테스트 실패: {e}")
-        logging.warning("   LLM 기능이 작동하지 않을 수 있지만, 서버는 계속 시작합니다.")
-    logging.info("✅ 모든 AI 모델 로드 완료")
-    logging.info("="*70)
+        router.find_closest_field("테스트 쿼리")
+    except: pass
+    logging.info(f"✅ 모델 로드 완료 ({time.time() - start:.2f}초)")
 
 @app.on_event("startup")
 async def startup_event():
     logging.info("🚀 FastAPI 시작...")
-    # 캐시 초기화 (In-memory backend 사용)
-    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
-    logging.info("✅ 캐시 시스템 초기화 완료.")
+    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache", key_builder=custom_key_builder)
     init_db()
     preload_models()
 
@@ -83,140 +154,101 @@ async def shutdown_event():
     logging.info("🧹 FastAPI 종료... Connection Pool 정리")
     cleanup_db()
 
-
+# --- Pydantic Models ---
 class SearchQuery(BaseModel):
     query: str
     search_mode: str = "all"
-
-class SearchResponse(BaseModel):
-    query: str
-    classification: dict
-    results: dict
-    final_panel_ids: list[str]
-    summary: dict
 
 class AnalysisRequest(BaseModel):
     query: str
     search_mode: str = "weighted"
 
-class AnalysisResponse(BaseModel):
-    query: str
-    total_count: int
-    main_summary: str
-    charts: list[dict]
-
-def _prepare_display_fields(classification: Dict) -> List[Dict]:
+# --- [핵심 수정] 스마트 컬럼 선택 로직 ---
+def _prepare_display_fields(classification: Dict, chart_fields: Optional[List[str]] = None) -> List[Dict]:
     """
-    [v3] classification 결과로부터 테이블 헤더(display_fields)를 생성합니다.
-    - `structured_filters`와 `must_have`/`preference` 키워드를 우선적으로 사용합니다.
+    VECTOR_CATEGORY_TO_FIELD를 참조하여 연관성 높은 컬럼들을 자동으로 선택합니다.
     """
     
-    # structured_filters에서 필드명 추출
-    structured_fields = [f.get('field') for f in classification.get('structured_filters', []) if f.get('field')]
+    # 1. 기본적으로 보여줄 필드 (어떤 검색이든 무조건 포함)
+    # DEMO_BASIC에 있는 것들을 기본으로 함
+    relevant_categories = {"DEMO_BASIC"}
     
-    must_have_kws = classification.get('must_have_keywords', [])
-    preference_kws = classification.get('preference_keywords', [])
-    
-    # 키워드 기반 필드 매핑
-    keyword_fields = []
-    for kw in must_have_kws + preference_kws:
-        mapping = get_field_mapping(kw)
-        if mapping and mapping.get('field') and mapping.get('field') != 'unknown':
-            keyword_fields.append(mapping.get('field'))
+    # 2. 타겟 필드 확인 -> 해당 카테고리 활성화
+    target_field = classification.get('target_field')
+    if target_field and target_field != 'unknown':
+        for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
+            if target_field in fields:
+                relevant_categories.add(category)
+                break # 한 필드는 한 카테고리에만 속한다고 가정
 
-    # 중복 제거 및 우선순위 부여 (구조화 필터 -> 키워드 필드)
-    header_fields = list(dict.fromkeys(structured_fields + keyword_fields))
+    # 3. 필터 조건 확인 -> 해당 카테고리 활성화
+    # 예: '자녀 수' 필터가 있으면 FAMILY_STATUS 카테고리 전체를 보여줌
+    structured_filters = classification.get('structured_filters', {}) or classification.get('demographic_filters', {})
     
-    if not header_fields:
-        logging.warning("⚠️ _prepare_display_fields: 분석할 필드가 없습니다. 빈 헤더 반환.")
-        return []
+    filter_keys = []
+    if isinstance(structured_filters, dict):
+        filter_keys = structured_filters.keys()
+    elif isinstance(structured_filters, list):
+        filter_keys = [f.get('field') for f in structured_filters if f.get('field')]
+
+    for f_key in filter_keys:
+        # age, age_range 등은 DEMO_BASIC에 포함되므로 자동 커버됨
+        # 그 외 필드들에 대해 카테고리 매칭
+        for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
+            if f_key in fields:
+                relevant_categories.add(category)
+
+    # 4. 카테고리 우선순위 정의 (보여줄 순서)
+    CATEGORY_ORDER = [
+        "DEMO_BASIC",      # 기본 인적사항 (가장 왼쪽)
+        "FAMILY_STATUS",   # 가족
+        "JOB_EDUCATION",   # 직업/학력
+        "INCOME_LEVEL",    # 소득
+        "TECH_OWNER",      # 기기
+        "CAR_OWNER",       # 차량
+        "DRINK_HABIT",     # 음주
+        "SMOKE_HABIT"      # 흡연
+    ]
 
     unique_fields = {}
-    for i, field in enumerate(header_fields):
-        if len(unique_fields) >= 5:
-            break
+    priority_counter = 0
+
+    # [A] 타겟 필드 최우선 배치
+    if target_field and target_field != 'unknown':
+        label = FIELD_NAME_MAP.get(target_field, target_field)
+        if target_field in QPOLL_FIELD_TO_TEXT:
+            label = QPOLL_FIELD_TO_TEXT[target_field] # 질문 텍스트
         
-        # 'age' 필드는 UI에 'birth_year'로 표시해야 할 수 있으므로 변환
-        display_field = 'birth_year' if field == 'age' else field
-        
-        if display_field and display_field not in unique_fields:
-            label = FIELD_NAME_MAP.get(display_field, display_field)
-            unique_fields[display_field] = {
-                'field': display_field,
-                'label': label,
-                'priority': i
-            }
-
-    # 컬럼 보강 로직 (필요시)
-    if len(unique_fields) < 5:
-        ALWAYS_INCLUDE_FIELDS = ['gender', 'birth_year', 'job_title_raw', 'region_major']
-        for field_key in ALWAYS_INCLUDE_FIELDS:
-            if len(unique_fields) >= 5: break
-            if field_key not in unique_fields:
-                korean_name = FIELD_NAME_MAP.get(field_key, field_key)
-                unique_fields[field_key] = {
-                    'field': field_key, 'label': korean_name, 'priority': 900 + len(unique_fields)
-                }
-
-    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
-    return final_result
- 
- 
-def _build_pro_mode_response( 
-    query_text: str,
-    classification: Dict,
-    search_results: Dict,
-    display_fields: List[Dict],
-    effective_search_mode: str
-) -> Tuple[Dict, List[str]]:
-    """
-    Pro 모드의 복잡한 응답 본문을 생성합니다.
-    """
-    source_counts = { 
-        "stage1_objective": search_results.get("stage_details", {}).get("stage1_objective", 0),
-        "stage2_must_have": search_results.get("stage_details", {}).get("stage2_must_have", 0),
-        "stage3_preference": search_results.get("stage_details", {}).get("stage3_preference", 0),
-        "stage4_negative": search_results.get("stage_details", {}).get("stage4_negative", 0),
-    }
-    
-    summary = {
-        "search_mode": effective_search_mode,
-        "ranked_keywords": classification.get('ranked_keywords_raw', [])
-    }
-
-    response = {
-        "query": query_text,
-        "classification": classification,
-        "display_fields": display_fields,
-        "source_counts": source_counts,
-        "summary": summary,
-    }
-
-    final_panel_ids = search_results.get('final_panel_ids', [])
-    total_count = search_results.get('total_count', 0)
-    
-    panel_id_list = final_panel_ids[:100]
-    response["final_panel_ids"] = panel_id_list
-
-    if effective_search_mode:
-        response["results"] = {
-            effective_search_mode: {
-                "count": total_count,
-                "panel_ids": panel_id_list,
-            }
+        unique_fields[target_field] = {
+            'field': target_field,
+            'label': label,
+            'priority': priority_counter
         }
+        priority_counter += 1
 
-    return response, panel_id_list
+    # [B] 활성화된 카테고리의 모든 필드 추가
+    for cat in CATEGORY_ORDER:
+        if cat in relevant_categories:
+            cat_fields = VECTOR_CATEGORY_TO_FIELD.get(cat, [])
+            for field in cat_fields:
+                if field not in unique_fields:
+                    unique_fields[field] = {
+                        'field': field,
+                        'label': FIELD_NAME_MAP.get(field, field),
+                        'priority': priority_counter
+                    }
+                    priority_counter += 1
 
+    # 5. 정렬 및 반환 (최대 8개 정도로 제한하여 가독성 확보)
+    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
+    
+    # 너무 많으면 잘라냄 (중요도 순)
+    return final_result[:8]
+ 
 async def _perform_common_search(query_text: str, search_mode: str, mode: str) -> Tuple[Dict, List[str], Dict]:
-    """
-    /search와 /search-and-analyze가 공유하는 핵심 로직
-    (LLM 분류, 병렬 검색, 로그 기록, 결과 포맷팅)
-    """
     logging.info(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
-    classification = classify_query_keywords(query_text)
+    classification = parse_query_intelligent(query_text)
     user_limit = classification.get('limit')
-    effective_search_mode = "quota" if user_limit and user_limit > 0 else search_mode
     
     search_results = hybrid_search(
         query=query_text,
@@ -225,11 +257,8 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     
     panel_id_list = search_results.get('final_panel_ids', [])
     total_count = len(panel_id_list)
-    log_search_query(query_text, total_count)
     
-    # ranked_keywords_raw를 must_have와 preference 키워드로만 구성
-    classification['ranked_keywords_raw'] = classification.get('must_have_keywords', []) + classification.get('preference_keywords', [])
-    display_fields = _prepare_display_fields(classification)
+    classification['target_field'] = search_results.get('target_field')
     
     if mode == "lite":
         lite_response = {
@@ -237,95 +266,72 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
             "classification": classification,
             "total_count": total_count,
             "final_panel_ids": panel_id_list[:500],
-            "effective_search_mode": effective_search_mode,
-            "display_fields": display_fields
+            "effective_search_mode": "quota",
         }
-
-        logging.info("✅ 공통 검색 완료 (Lite 모드 간소화)")
         return lite_response, panel_id_list, classification
 
-    response, panel_id_list = _build_pro_mode_response(
-        query_text,
-        classification,
-        search_results,
-        display_fields,
-        effective_search_mode,
-    )
-    
-    logging.info("✅ 공통 검색 완료 (Pro 모드 전체 데이터)")
-    return response, panel_id_list, classification
+    pro_mode_info = {
+        "query": query_text,
+        "classification": classification,
+        "search_results": search_results,
+        "effective_search_mode": "quota",
+        "final_panel_ids": panel_id_list
+    }
+    return pro_mode_info, panel_id_list, classification
 
 
 async def _get_ordered_welcome_data(
     ids_to_fetch: List[str], 
     fields_to_fetch: List[str] = None
 ) -> List[dict]:
-    """
-    DB에서 패널 데이터를 조회하되, 입력된 id 리스트 순서를 보장하여 반환합니다.
-    """
-    if not ids_to_fetch:
-        return []
+    if not ids_to_fetch: return []
 
     table_data = []
     try:
         with get_db_connection_context() as conn:
-            if not conn:
-                raise Exception("DB 연결 실패")
-
+            if not conn: raise Exception("DB 연결 실패")
             cur = conn.cursor()
-
             sql_query = "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
             cur.execute(sql_query, (ids_to_fetch,))
             results = cur.fetchall()
-
             fetched_data_map = {row[0]: row for row in results}
 
             for pid in ids_to_fetch:
                 if pid in fetched_data_map:
                     row_data = fetched_data_map[pid]
                     panel_id_val, structured_data_val = row_data
-
                     display_data = {'panel_id': panel_id_val}
 
                     if fields_to_fetch:
                         if isinstance(structured_data_val, dict):
                             for field in fields_to_fetch:
                                 if field != 'panel_id':
-                                    display_data[field] = structured_data_val.get(field)
+                                    # 일반 필드는 truncate_text 적용
+                                    val = structured_data_val.get(field)
+                                    display_data[field] = truncate_text(val) 
                     else:
                         if isinstance(structured_data_val, dict):
-                            display_data.update(structured_data_val)
-
+                            for k, v in structured_data_val.items():
+                                if k != 'panel_id':
+                                    display_data[k] = truncate_text(v)
                     table_data.append(display_data)
-
             cur.close()
-
     except Exception as db_e:
-        logging.error(f"Table Data 조회 실패: {db_e}", exc_info=True)
-    
+        logging.error(f"Table Data 조회 실패: {db_e}")
     return table_data
 
 async def _get_qpoll_responses_for_table(
     ids_to_fetch: List[str], 
     qpoll_fields: List[str]
 ) -> Dict[str, Dict[str, str]]:
-    """
-    주어진 panel_id 목록과 Q-Poll 필드 목록에 대해 Qdrant에서 응답을 조회합니다.
-    Returns: {panel_id: {qpoll_field: sentence}}
-    """
-    if not ids_to_fetch or not qpoll_fields:
-        return {}
+    if not ids_to_fetch or not qpoll_fields: return {}
     
     questions_to_fetch = [QPOLL_FIELD_TO_TEXT[f] for f in qpoll_fields if f in QPOLL_FIELD_TO_TEXT]
-    
-    if not questions_to_fetch:
-        return {}
+    if not questions_to_fetch: return {}
 
     def qdrant_call():
         qpoll_client = get_qdrant_client()
         if not qpoll_client: return {}
-        
-        COLLECTION_NAME = "qpoll_vectors_v2"
         
         query_filter = Filter(
             must=[
@@ -335,14 +341,13 @@ async def _get_qpoll_responses_for_table(
         )
         
         qpoll_results, _ = qpoll_client.scroll(
-            collection_name=COLLECTION_NAME,
+            collection_name="qpoll_vectors_v2",
             scroll_filter=query_filter,
             limit=len(ids_to_fetch) * len(questions_to_fetch),
             with_payload=True, with_vectors=False
         )
 
         result_map = {pid: {} for pid in ids_to_fetch}
-        
         text_to_field_map = {v: k for k, v in QPOLL_FIELD_TO_TEXT.items()}
         
         for point in qpoll_results:
@@ -353,46 +358,28 @@ async def _get_qpoll_responses_for_table(
             if pid and question and sentence:
                 field_key = text_to_field_map.get(question)
                 if field_key:
-                    result_map[pid][field_key] = sentence
+                    # [핵심 수정] 문장 전체가 아니라 템플릿 기반으로 추출한 '핵심 답변'만 테이블에 넣음
+                    core_value = extract_answer_from_template(field_key, sentence)
+                    result_map[pid][field_key] = core_value
                     
         return result_map
 
     return await asyncio.get_running_loop().run_in_executor(None, qdrant_call)
 
 @app.post("/api/search")
-@cache(expire=600) # 10분 동안 캐시
 async def search_panels(search_query: SearchQuery):
-    """
-    🚀 Lite 모드: 빠른 검색 (차트 분석 없이 테이블 데이터만 반환)
-    """
     logging.info(f"🚀 [Lite 모드] 빠른 검색 시작: {search_query.query}")
-    
-    valid_modes = ["all", "weighted", "union", "intersection"]
-    if search_query.search_mode not in valid_modes:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid search_mode. Must be one of: {valid_modes}"
-        )
-    
     try:
-        start_time = time.time()
-        
         lite_response, _, _ = await _perform_common_search(
-            search_query.query, 
-            search_query.search_mode,
-            mode="lite"
+            search_query.query, search_query.search_mode, mode="lite"
         )
-        
-        search_time = time.time() - start_time
-        logging.info(f"⏱️  [Lite 모드] 검색 완료: {search_time:.2f}초")
-        
         ids_to_fetch = lite_response.get('final_panel_ids', [])
-        display_fields = lite_response.get('display_fields', [])
         
-        qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
+        # Lite 모드에서도 스마트 컬럼 적용
+        display_fields = _prepare_display_fields(lite_response['classification'])
+        
         welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
-        
-        db_start = time.time()
+        qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
         
         welcome_table_data = await _get_ordered_welcome_data(ids_to_fetch, welcome_fields)
         qpoll_responses_map = await _get_qpoll_responses_for_table(ids_to_fetch, qpoll_fields)
@@ -404,76 +391,40 @@ async def search_panels(search_query: SearchQuery):
                 welcome_row.update(qpoll_responses_map[pid])
             table_data.append(welcome_row)
             
-        db_time = time.time() - db_start
-        logging.info(f"✅ [Lite 모드] 통합 테이블 데이터 {len(table_data)}개 조회 완료: {db_time:.2f}초")
-        
         lite_response['tableData'] = table_data
+        lite_response['display_fields'] = display_fields # 프론트엔드가 헤더를 알 수 있게 전달
         lite_response['mode'] = "lite" 
         del lite_response['final_panel_ids']
         
-        total_time = time.time() - start_time
-        logging.info(f"✅ [Lite 모드] 전체 완료: {total_time:.2f}초 - 총 {lite_response['total_count']}개 결과 중 {len(table_data)}개 테이블 데이터 반환")
-        
         return lite_response
-        
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        logging.error(f"[Lite 모드] /api/search 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
+        logging.error(f"[Lite 모드] 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/search-and-analyze")
-@cache(expire=600) # 10분 동안 캐시
 async def search_and_analyze(request: AnalysisRequest):
-    """
-    📊 Pro 모드: 검색 + 인사이트 분석 (차트 + 테이블 데이터 반환)
-    """
     logging.info(f"📊 [Pro 모드] 검색 + 분석 시작: {request.query}")
-    
-    valid_modes = ["all", "weighted", "union", "intersection"]
-    if request.search_mode not in valid_modes:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Invalid search_mode. Must be one of: {valid_modes}"
-        )
-    
     try:
-        response, panel_id_list, classification = await _perform_common_search(
-            request.query, 
-            request.search_mode,
-            mode="pro"
+        pro_info, panel_ids, classification = await _perform_common_search(
+            request.query, request.search_mode, mode="pro"
         )
         
-        display_fields = response.get('display_fields', [])
-        
-        logging.info("📊 [Pro 모드] 차트 데이터 생성 시작")
-        analysis_result, status_code = analyze_search_results(
-            request.query, 
-            classification,
-            panel_id_list[:5000]
+        # 차트 생성
+        analysis_result, status_code = await asyncio.to_thread(analyze_search_results,
+            request.query, classification, panel_ids[:5000]
         )
+        charts = analysis_result.get('charts', [])
         
-        if status_code == 200:
-            response['charts'] = analysis_result.get('charts', [])
-            response['analysis_summary'] = analysis_result.get('main_summary', '')
-            logging.info(f"✅ [Pro 모드] 차트 {len(response['charts'])}개 생성 완료")
-        else:
-            response['charts'] = []
-            response['analysis_summary'] = '차트 생성 실패'
-            logging.warning("[Pro 모드] 차트 생성 실패")
-        
-        logging.info(f"📊 [Pro 모드] Table Data 생성 시작 (패널 {len(panel_id_list)}개 대상)")
-        ids_to_fetch = response['final_panel_ids']
-        
-        welcome_table_data = await _get_ordered_welcome_data(ids_to_fetch, fields_to_fetch=None)
-        
-        qpoll_fields = [
-            item['field'] for item in display_fields 
-            if item['field'] in QPOLL_FIELD_TO_TEXT
-        ]
+        # [스마트 컬럼] 차트 필드와 상관없이, 카테고리 기반으로 깔끔하게 선정
+        display_fields = _prepare_display_fields(classification)
 
-        qpoll_responses_map = await _get_qpoll_responses_for_table(ids_to_fetch, qpoll_fields)
+        # 테이블 데이터 조회
+        welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
+        qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
+
+        welcome_table_data = await _get_ordered_welcome_data(panel_ids[:100], fields_to_fetch=welcome_fields)
+        qpoll_responses_map = await _get_qpoll_responses_for_table(panel_ids[:100], qpoll_fields)
 
         table_data = []
         for welcome_row in welcome_table_data:
@@ -481,105 +432,71 @@ async def search_and_analyze(request: AnalysisRequest):
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
             table_data.append(welcome_row)
-
-        response['tableData'] = table_data
-        response['mode'] = 'pro'
         
-        logging.info(f"✅ [Pro 모드] 차트 {len(response.get('charts', []))}개, 통합 테이블 데이터 {len(table_data)}개 생성 완료")
+        response_data = {
+            "query": pro_info["query"],
+            "classification": classification,
+            "display_fields": display_fields,
+            "charts": charts,
+            "tableData": table_data,
+            "total_count": len(panel_ids),
+            "mode": 'pro'
+        }
+        return response_data
         
-        return response
-        
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        logging.error(f"[Pro 모드] /api/search-and-analyze 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
-
+        logging.error(f"[Pro 모드] 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/debug/classify")
 async def debug_classify(search_query: SearchQuery):
-    """
-    질의를 키워드로 분류만 하고 결과를 반환 (검색은 수행하지 않음)
-    """
     try:
-        classification = classify_query_keywords(search_query.query)
-        return {
-            "query": search_query.query,
-            "classification": classification
-        }
+        classification = parse_query_intelligent(search_query.query)
+        return {"query": search_query.query, "classification": classification}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"분류 실패: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 async def _get_welcome_data(panel_id: str) -> Dict:
-    """PostgreSQL에서 Welcome 데이터를 비동기적으로 조회합니다."""
     def db_call():
         with get_db_connection_context() as conn:
-            if not conn:
-                raise HTTPException(status_code=500, detail="DB 연결 실패")
-            
+            if not conn: raise HTTPException(status_code=500)
             cur = conn.cursor()
-            cur.execute(
-                "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = %s",
-                (panel_id,)
-            )
+            cur.execute("SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = %s", (panel_id,))
             result = cur.fetchone()
             cur.close()
-            
-            if not result:
-                raise HTTPException(status_code=404, detail=f"panel_id {panel_id}를 찾을 수 없습니다.")
-            
-            panel_id_value, structured_data = result
-            panel_data = {"panel_id": panel_id_value}
-            if isinstance(structured_data, dict):
-                panel_data.update(structured_data)
-            return panel_data
-
+            if not result: raise HTTPException(status_code=404)
+            pid, data = result
+            p_data = {"panel_id": pid}
+            if isinstance(data, dict): p_data.update(data)
+            return p_data
     return await asyncio.get_running_loop().run_in_executor(None, db_call)
 
 
 async def _get_qpoll_data(panel_id: str) -> Dict:
-    """Qdrant에서 QPoll 데이터를 비동기적으로 조회합니다."""
-    qpoll_data = {"qpoll_응답_개수": 0}
-
+    q_data = {"qpoll_응답_개수": 0}
     def qdrant_call():
         try:
-            qdrant_client = get_qdrant_client()
-            if not qdrant_client:
-                logging.warning("⚠️  Qdrant 클라이언트 없음")
-                return qpoll_data
-
-            logging.info(f"🔍 QPoll 데이터 조회 시작 (panel_id: {panel_id})")
-            qpoll_results, _ = qdrant_client.scroll(
+            client = get_qdrant_client()
+            if not client: return q_data
+            res, _ = client.scroll(
                 collection_name="qpoll_vectors_v2",
                 scroll_filter=Filter(must=[FieldCondition(key="panel_id", match=MatchValue(value=panel_id))]),
                 limit=100, with_payload=True, with_vectors=False
             )
-
-            if qpoll_results:
-                logging.info(f"✅ QPoll 응답 {len(qpoll_results)}개 발견")
-                text_to_field_map = {v: k for k, v in QPOLL_FIELD_TO_TEXT.items()}
-                for point in qpoll_results:
-                    if point.payload:
-                        question = point.payload.get("question")
-                        sentence = point.payload.get("sentence")
-                        if question and sentence:
-                            field_key = text_to_field_map.get(question)
-                            if field_key:
-                                qpoll_data[field_key] = sentence
-                qpoll_data["qpoll_응답_개수"] = len(qpoll_results)
-            else:
-                logging.warning("⚠️  QPoll 응답 없음")
-            
-            return qpoll_data
-
-        except Exception as qpoll_error:
-            logging.error(f"❌ QPoll 조회 실패 (panel_id: {panel_id}): {qpoll_error}", exc_info=True)
-            qpoll_data["qpoll_조회_오류"] = str(qpoll_error)
-            return qpoll_data
-
+            if res:
+                q_data["qpoll_응답_개수"] = len(res)
+                txt_map = {v: k for k, v in QPOLL_FIELD_TO_TEXT.items()}
+                for p in res:
+                    if p.payload:
+                        q = p.payload.get("question")
+                        s = p.payload.get("sentence")
+                        if q and s:
+                            k = txt_map.get(q)
+                            if k: q_data[k] = s
+            return q_data
+        except: return q_data
     return await asyncio.get_running_loop().run_in_executor(None, qdrant_call)
-
 
 @app.get("/api/panels/{panel_id}")
 async def get_panel_details(panel_id: str):

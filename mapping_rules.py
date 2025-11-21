@@ -381,3 +381,11 @@ QPOLL_ANSWER_TEMPLATES = {
     "most_saved_photo_type": "휴대폰 갤러리에 가장 많이 저장되어져 있는 사진은 {answer_str}이다.",
     "favorite_summer_water_spot": "여름철 물놀이 장소로 가장 선호하는 곳은 {answer_str}이다.",
 }
+
+# [추가] 질문 필드별 '부정/제외' 의미를 가진 키워드 정의
+NEGATIVE_ANSWER_KEYWORDS = {
+    "moving_stress_factor": ["스트레스 받지 않는다", "없다", "딱히 없다", "신경 안 쓴다", "모르겠다", "상관 없다"],
+    "ott_count": ["이용 안 함", "없음", "0개", "보지 않음"],
+    "pet_experience": ["없다", "키워본 적 없다", "비반려인"],
+    "summer_worry": ["걱정 없다", "없음", "별로 없다"],
+}

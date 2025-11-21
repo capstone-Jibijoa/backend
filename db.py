@@ -7,7 +7,6 @@ from qdrant_client import QdrantClient
 from threading import Lock
 from contextlib import contextmanager
 
-
 load_dotenv()
 
 _connection_pool = None
