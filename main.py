@@ -2,8 +2,6 @@ import os
 import json
 import time
 import logging
-from contextlib import asynccontextmanager
-from threading import Thread
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Tuple, Dict, List
@@ -41,77 +39,7 @@ logging.getLogger("uvicorn").setLevel(logging.WARNING)
 logging.getLogger("fastapi").setLevel(logging.WARNING)
 # --- 로깅 설정 ---
 
-# 전역 변수 - 모델 로드 상태 추적
-models_loaded = False
-
-
-def preload_models():
-    """애플리케이션 시작 시 모든 AI 모델을 미리 로드합니다."""
-    global models_loaded
-    logging.info("="*70)
-    logging.info("🔄 모든 AI 모델을 미리 로드합니다...")
-    
-    try:
-        initialize_embeddings()
-        classify_query_keywords("모델 로딩 테스트")
-        
-        try:
-            classify_query_keywords("모델 로딩 테스트")
-            logging.info("✅ Claude (LLM) 모델 연결 확인 완료.")
-        except Exception as e:
-            logging.warning(f"⚠️  Claude (LLM) 모델 연결 테스트 실패: {e}")
-            logging.warning("   LLM 기능이 작동하지 않을 수 있지만, 서버는 계속 시작합니다.")
-        
-        models_loaded = True
-        logging.info("✅ 모든 AI 모델 로드 완료")
-        logging.info("="*70)
-        
-    except Exception as e:
-        logging.error(f"❌ 모델 로드 실패: {e}")
-        models_loaded = False
-
-
-def load_models_background():
-    """백그라운드에서 모델 로드"""
-    try:
-        preload_models()
-    except Exception as e:
-        logging.error(f"❌ 백그라운드 모델 로드 실패: {e}")
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """FastAPI lifespan 이벤트 (startup + shutdown)"""
-    # Startup
-    logging.info("🚀 FastAPI 시작...")
-    
-    # 캐시 초기화
-    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
-    logging.info("✅ 캐시 시스템 초기화 완료.")
-    
-    # DB 초기화
-    init_db()
-    
-    # 백그라운드에서 모델 로드 (서버 시작을 막지 않음)
-    logging.info("🔄 AI 모델을 백그라운드에서 로드합니다...")
-    Thread(target=load_models_background, daemon=True).start()
-    
-    logging.info("✅ FastAPI 시작 완료! (AI 모델은 백그라운드에서 로드 중...)")
-    
-    yield  # 애플리케이션 실행
-    
-    # Shutdown
-    logging.info("🛑 FastAPI 종료 중...")
-    logging.info("🧹 Connection Pool 정리")
-    cleanup_db()
-
-
-# FastAPI 앱 생성 시 lifespan 적용
-app = FastAPI(
-    title="Multi-Table Hybrid Search API v3 (Refactored)",
-    lifespan=lifespan
-)
-
+app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
 
 origins = [
     "http://localhost:5173",
@@ -125,6 +53,35 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def preload_models():
+    """애플리케이션 시작 시 모든 AI 모델을 미리 로드합니다."""
+    logging.info("="*70)
+    logging.info("🔄 모든 AI 모델을 미리 로드합니다...")
+    initialize_embeddings()
+    classify_query_keywords("모델 로딩 테스트")
+    try:
+        classify_query_keywords("모델 로딩 테스트")
+        logging.info("✅ Claude (LLM) 모델 연결 확인 완료.")
+    except Exception as e:
+        logging.warning(f"⚠️  Claude (LLM) 모델 연결 테스트 실패: {e}")
+        logging.warning("   LLM 기능이 작동하지 않을 수 있지만, 서버는 계속 시작합니다.")
+    logging.info("✅ 모든 AI 모델 로드 완료")
+    logging.info("="*70)
+
+@app.on_event("startup")
+async def startup_event():
+    logging.info("🚀 FastAPI 시작...")
+    # 캐시 초기화 (In-memory backend 사용)
+    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
+    logging.info("✅ 캐시 시스템 초기화 완료.")
+    init_db()
+    preload_models()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logging.info("🧹 FastAPI 종료... Connection Pool 정리")
+    cleanup_db()
 
 
 class SearchQuery(BaseModel):
@@ -147,7 +104,6 @@ class AnalysisResponse(BaseModel):
     total_count: int
     main_summary: str
     charts: list[dict]
-
 
 def _prepare_display_fields(classification: Dict) -> List[Dict]:
     """
@@ -324,19 +280,6 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     /search와 /search-and-analyze가 공유하는 핵심 로직
     (LLM 분류, 병렬 검색, 로그 기록, 결과 포맷팅)
     """
-    # 모델이 아직 로드 중이면 대기 (최대 60초)
-    max_wait = 60
-    waited = 0
-    while not models_loaded and waited < max_wait:
-        await asyncio.sleep(1)
-        waited += 1
-    
-    if not models_loaded:
-        raise HTTPException(
-            status_code=503,
-            detail="AI 모델이 아직 로드 중입니다. 잠시 후 다시 시도해주세요."
-        )
-    
     logging.info(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
     classification = classify_query_keywords(query_text)
     user_limit = classification.get('limit')
@@ -742,12 +685,10 @@ def read_root():
         "service": "Multi-Table Hybrid Search & Analysis API",
         "version": "3.0 (Refactored)",
         "status": "running",
-        "models_loaded": models_loaded,
         "optimizations_applied": [
             "DB Connection Pool (psycopg2-pool)",
             "Parallel Search (ThreadPoolExecutor)",
-            "DB Aggregate Queries (analysis_logic)",
-            "Background Model Loading"
+            "DB Aggregate Queries (analysis_logic)"
         ],
         "endpoints": {
             "search": "/api/search (Lite)",
@@ -767,12 +708,10 @@ def health_check():
         
         return {
             "status": "healthy",
-            "database": db_status,
-            "models_loaded": models_loaded
+            "database": db_status
         }
     except Exception as e:
         return {
             "status": "unhealthy",
-            "error": str(e),
-            "models_loaded": models_loaded
+            "error": str(e)
         }
