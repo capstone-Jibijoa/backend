@@ -1,34 +1,31 @@
 # --------------------
-
 # 1. 빌드 스테이지 (Build Stage)
-
 # 의존성 설치 및 빌드를 담당하여 최종 이미지 크기를 줄입니다.
-
 # --------------------
 
 FROM python:3.11-slim as builder
 
 # 1.1 환경 설정
-# 컨테이너 내에서 작업을 수행할 디렉토리를 설정
 WORKDIR /app
 
-# 1.1.5 시스템 종속성 설치 (PostgreSQL client library 등)
-# postgresql-dev는 psycopg2 등 DB 라이브러리 빌드에 필요
-# build-essential은 pip 설치 시 필요한 컴파일러 도구
+# 1.2 시스템 종속성 설치 (PostgreSQL client library 등)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 1.2 의존성 설치
-# requirements.txt 파일을 복사
+# 1.3 의존성 설치
 COPY requirements.txt .
 
-# 1.3 가상 환경 생성 및 의존성 설치
-# 빌드 시에만 필요한 툴과 의존성을 설치
-RUN pip install --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir --prefix=/venv -r requirements.txt
+# 1.4 가상 환경 생성 및 의존성 설치
+# python -m venv를 사용하여 올바른 가상환경 생성
+RUN python -m venv /venv && \
+    /venv/bin/pip install --upgrade pip setuptools wheel && \
+    /venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# 1.5 uvicorn 설치 확인
+RUN /venv/bin/uvicorn --version
 
 # --------------------
 # 2. 프로덕션 스테이지 (Production Stage)
@@ -40,32 +37,43 @@ FROM python:3.11-slim
 # 2.1 환경 설정
 WORKDIR /app
 
-# ⚠️ 수정됨: 비-루트 사용자 생성
-# 사용자만 생성합니다. 대부분의 기본 OS 이미지에는 동일한 이름의 그룹이 자동으로 생성되지 않습니다.
-RUN adduser --system --no-create-home appuser
+# 2.2 런타임 시스템 종속성 설치 (psycopg2 실행에 필요)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpq5 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# ⚠️ 수정됨: 작업 디렉토리의 소유권을 appuser로 변경
-# 그룹 소유권(콜론과 그룹명)을 생략하여 chown: invalid group 오류를 방지합니다.
+# 2.3 비-루트 사용자 생성 및 홈 디렉토리 설정
+RUN adduser --system --home /home/appuser appuser && \
+    mkdir -p /home/appuser/.cache/huggingface && \
+    chown -R appuser /home/appuser
+
+# 2.4 작업 디렉토리의 소유권 변경
 RUN chown -R appuser /app
 
-# 2.2 빌드 스테이지에서 가상 환경 복사
-# /venv 디렉토리 전체를 복사 (설치된 모든 의존성이 포함됨)
+# 2.5 빌드 스테이지에서 가상 환경 복사
 COPY --from=builder /venv /venv
 
-# 2.3 PATH 환경 변수 설정
-# venv의 bin 디렉토리를 PATH에 추가하여 설치된 명령어를 바로 사용 가능하게 함
-ENV PATH="/venv/bin:$PATH"
+# 2.6 환경 변수 설정
+ENV PATH="/venv/bin:$PATH" \
+    PYTHONPATH="/app" \
+    PYTHONUNBUFFERED=1 \
+    TRANSFORMERS_CACHE="/home/appuser/.cache/huggingface" \
+    HF_HOME="/home/appuser/.cache/huggingface"
 
-# 2.4 애플리케이션 코드 복사
-# 프로젝트 코드 전체를 복사합니다.
-# ⚠️ 수정됨: 소유권 변경 시에도 그룹을 생략하여 오류를 방지합니다.
+# 2.7 애플리케이션 코드 복사
 COPY --chown=appuser . .
 
-# 2.5 비-루트 사용자 전환
+# 2.8 비-루트 사용자 전환
 USER appuser
 
-# 2.6 포트 노출
+# 2.9 포트 노출
 EXPOSE 8000
 
-# 2.7 실행 명령어
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 2.10 헬스체크 추가
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# 2.11 실행 명령어
+CMD ["/venv/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
