@@ -15,21 +15,43 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from db import get_db_connection_context
 from mapping_rules import CATEGORY_MAPPING, get_field_mapping
 
-# [수정] LLM 필드명 -> 실제 DB 필드명 매핑 (여기에 household_size 추가!)
+# LLM 필드명 -> 실제 DB 필드명 매핑
 FIELD_ALIAS_MAP = {
-    "household_size": "family_size",  # 1인 가구 -> 가족 수
-    "age": "birth_year",              # 나이 -> 출생연도
-    "job": "job_title_raw",           # 직업
-    "region": "region_major"          # 지역
+    "household_size": "family_size",  
+    "age": "birth_year",              
+    "job": "job_title_raw",           
+    "region": "region_major"          
 }
 
-# 값 변환이 필요한 필드를 위한 매핑
+# [핵심 수정] 실제 데이터(명사형)를 포함하도록 매핑 키워드 확장
 VALUE_TRANSLATION_MAP = {
     'gender': {
         '남성': 'M', '여성': 'F', '남자': 'M', '여자': 'F',
     },
     'marital_status': {
         '미혼': '미혼', '싱글': '미혼', '기혼': '기혼', '결혼': '기혼', '이혼': '이혼', '돌싱': '이혼'
+    },
+    'car_ownership': {
+        '있음': '있다', 
+        '보유': '있다', 
+        '자차': '있다', 
+        '오너': '있다',
+        '없음': '없다', 
+        '미보유': '없다', 
+        '뚜벅이': '없다'
+    },
+    'smoking_experience': {
+        # [수정] 데이터가 "일반 담배", "전자담배" 형태이므로 해당 단어 포함
+        '있음': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'], 
+        '흡연': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
+        # 부정 키워드는 확실한 것만
+        '없음': ['피워본 적이', '비흡연'],
+        '비흡연': ['피워본 적이', '비흡연'],
+    },
+    'drinking_experience': {
+        # [수정] 음주 데이터도 '소주', '맥주' 형태이므로 종류 포함
+        '있음': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '마신다', '음주', '술'],
+        '없음': ['마시지', '비음주', '금주'],
     }
 }
 
@@ -61,17 +83,14 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
         if not raw_field or not operator:
             continue
 
-        # [핵심 1] 필드명 매핑 적용 (household_size -> family_size)
         field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
-        # --- [특수 처리] 나이 계산 (Age -> birth_year) ---
-        # raw_field가 'age'이거나 매핑된 field가 'birth_year'인 경우
+        # --- [특수 처리] 나이 계산 ---
         if field == "birth_year" or raw_field == "age":
             if operator == "between" and isinstance(value, list) and len(value) == 2:
                 age_start, age_end = value
                 birth_year_end = CURRENT_YEAR - age_start
                 birth_year_start = CURRENT_YEAR - age_end
-                # 인덱스 활용을 위해 형변환
                 conditions.append(f"(structured_data->>'birth_year')::int BETWEEN %s AND %s")
                 params.extend([birth_year_start, birth_year_end])
             continue
@@ -79,20 +98,34 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
         # --- [값 변환] 매핑된 값으로 변환 ---
         final_value = value
         if field in VALUE_TRANSLATION_MAP:
+            mapping = VALUE_TRANSLATION_MAP[field]
             if isinstance(value, list):
-                final_value = [VALUE_TRANSLATION_MAP[field].get(v, v) for v in value]
+                converted_list = []
+                for v in value:
+                    mapped_v = mapping.get(v, v)
+                    if isinstance(mapped_v, list):
+                        converted_list.extend(mapped_v)
+                    else:
+                        converted_list.append(mapped_v)
+                final_value = converted_list
             else:
-                final_value = VALUE_TRANSLATION_MAP[field].get(value, value)
+                mapped_v = mapping.get(value, value)
+                final_value = mapped_v
 
         # --- [분기 1] JSON 배열(List) 필드 처리 ---
+        # ILIKE를 사용하여 부분 문자열 검색 (배열 -> 문자열 변환 후 검색)
         if field in ARRAY_FIELDS:
-            if operator == "in" and isinstance(final_value, list):
-                placeholders = ','.join(['%s'] * len(final_value))
-                conditions.append(f"structured_data->'{field}' ?| array[{placeholders}]")
-                params.extend(final_value)
-            elif operator == "eq":
-                conditions.append(f"structured_data->'{field}' ? %s")
-                params.append(str(final_value))
+            if not isinstance(final_value, list):
+                final_value = [final_value]
+            
+            # "일반 담배" 데이터에서 "일반"만 있어도 찾을 수 있게 ILIKE 사용
+            or_conditions = []
+            for v in final_value:
+                or_conditions.append(f"structured_data->>'{field}' ILIKE %s")
+                params.append(f"%{v}%")
+            
+            if or_conditions:
+                conditions.append(f"({' OR '.join(or_conditions)})")
 
         # --- [분기 2] 숫자형 필드 처리 ---
         elif field in ["children_count"]:
@@ -112,10 +145,8 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
 
         # --- [분기 3] 일반 문자열 필드 처리 ---
         else:
-            # [핵심 2] 속도 최적화를 위해 TRIM() 제거 -> structured_data->>'field'
             field_sql = f"structured_data->>'{field}'"
 
-            # family_size(1인 가구 등)는 숫자 '1' 검색 시 '1명', '1인' 등을 모두 찾아야 함
             if field == "family_size":
                 if isinstance(final_value, list):
                     or_conditions = []
@@ -128,12 +159,10 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                     params.append(f"%{final_value}%")
 
             elif operator == "eq":
-                # job_title_raw 등은 부분 일치(ILIKE)가 안전
                 if field in ["job_title_raw", "job_duty_raw"]:
                      conditions.append(f"{field_sql} ILIKE %s")
                      params.append(f"%{final_value}%")
                 else:
-                     # 그 외(지역, 성별 등)는 정확 일치 (인덱스 활용 최적화)
                      conditions.append(f"{field_sql} = %s")
                      params.append(str(final_value))
 
@@ -158,9 +187,6 @@ def search_welcome_objective(
     filters: List[Dict],
     attempt_name: str = "구조화"
 ) -> Tuple[Set[str], Set[str]]:
-    """
-    Stage 1: LLM 필터 -> PostgreSQL 필터링
-    """
     if not filters:
         logging.info(f"   Welcome {attempt_name}: 필터 없음")
         return set(), set()
@@ -194,7 +220,7 @@ def search_welcome_objective(
         logging.error(f"   Welcome {attempt_name} 검색 실패: {e}", exc_info=True)
         return set(), set()
 
-
+# ... (이하 search_preference_conditions, filter_negative_conditions, initialize_embeddings 등 기존 코드 유지) ...
 def search_preference_conditions(
     preference_keywords: List[str],
     query_vectors: List[List[float]],
@@ -256,35 +282,15 @@ def filter_negative_conditions(
         logging.error(f"Negative 필터링 실패: {e}")
         return panel_ids
 
-@lru_cache(maxsize=None)
-def initialize_embeddings():
-    try:
-        return HuggingFaceEmbeddings(model_name="nlpai-lab/KURE-v1", model_kwargs={'device': 'cpu'})
-    except Exception as e:
-        logging.error(f"임베딩 로드 실패: {e}")
-        raise
-
-def embed_keywords(keywords: List[str]) -> List[List[float]]:
-    if not keywords: return []
-    try:
-        return initialize_embeddings().embed_documents(keywords)
-    except Exception as e:
-        logging.error(f"임베딩 실패: {e}")
-        return []
-
 def find_negative_answer_ids(
     candidate_ids: Set[str],
     target_field: str,
     collection_name: str,
     is_welcome_collection: bool = False,
-    threshold: float = 0.82 # 유사도 0.82 이상이면 '부정 답변'으로 간주
+    threshold: float = 0.82 
 ) -> Set[str]:
-    """
-    후보군 중에서 '없다', '모르겠다' 등 부정적인 답변을 한 패널의 ID를 찾습니다.
-    """
     from mapping_rules import NEGATIVE_ANSWER_KEYWORDS
     
-    # 1. 해당 필드에 대한 부정 키워드가 없으면 스킵
     negative_keywords = NEGATIVE_ANSWER_KEYWORDS.get(target_field)
     if not negative_keywords or not candidate_ids:
         return set()
@@ -293,28 +299,24 @@ def find_negative_answer_ids(
         client = QdrantClient(url=os.getenv("QDRANT_HOST"))
         embeddings = initialize_embeddings()
         
-        # 2. 부정 키워드 벡터화 (예: "스트레스 없다"의 벡터)
-        # 여러 키워드 중 하나라도 걸리면 되므로 각각 검색
         negative_vectors = embeddings.embed_documents(negative_keywords)
         
         ids_to_exclude = set()
         id_key_path = "metadata.panel_id" if is_welcome_collection else "panel_id"
         
-        # 3. 후보군(candidate_ids) 내에서만 검색하도록 필터 설정
         search_filter = Filter(
             must=[
                 FieldCondition(key=id_key_path, match=MatchAny(any=list(candidate_ids)))
             ]
         )
         
-        # 4. 각 부정 키워드에 대해 검색 실행
         for neg_vec in negative_vectors:
             hits = client.search(
                 collection_name=collection_name,
                 query_vector=neg_vec,
                 query_filter=search_filter,
-                limit=len(candidate_ids), # 후보군 전체 검사
-                score_threshold=threshold, # [중요] 이 점수보다 높으면 '부정 답변'으로 간주
+                limit=len(candidate_ids), 
+                score_threshold=threshold, 
                 with_payload=[id_key_path]
             )
             
@@ -335,3 +337,19 @@ def find_negative_answer_ids(
     except Exception as e:
         logging.error(f"부정 필터링 실패: {e}")
         return set()
+
+@lru_cache(maxsize=None)
+def initialize_embeddings():
+    try:
+        return HuggingFaceEmbeddings(model_name="nlpai-lab/KURE-v1", model_kwargs={'device': 'cpu'})
+    except Exception as e:
+        logging.error(f"임베딩 로드 실패: {e}")
+        raise
+
+def embed_keywords(keywords: List[str]) -> List[List[float]]:
+    if not keywords: return []
+    try:
+        return initialize_embeddings().embed_documents(keywords)
+    except Exception as e:
+        logging.error(f"임베딩 실패: {e}")
+        return []
