@@ -1,169 +1,222 @@
-import os
 import json
 import re
+import os
 import logging
-from dotenv import load_dotenv
+from typing import Dict, List, Optional, Any
 from functools import lru_cache
-from fastapi import HTTPException
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
-from settings import settings
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Claude 클라이언트 초기화
+# 1. Claude 클라이언트 설정
 try:
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1, api_key=settings.ANTHROPIC_API_KEY)
+    # API Key는 환경변수(.env)에서 자동으로 로드됩니다.
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1)
 except Exception as e:
     CLAUDE_CLIENT = None
     logging.error(f"Anthropic 클라이언트 생성 실패: {e}")
 
-@lru_cache(maxsize=128)
-def classify_query_keywords(query: str) -> dict:
-    """
-    쿼리를 4개 카테고리(objective, must_have, preference, negative)로 분류합니다.
-    """
-    if CLAUDE_CLIENT is None:
-        raise HTTPException(status_code=500, detail="Claude 클라이언트가 초기화되지 않았습니다.")
 
-    system_prompt = """
-당신은 사용자 쿼리를 분석하여 4가지 카테고리로 정확하게 분류하는 전문가입니다.
+# 2. DB 스키마 정보
+DB_SCHEMA_INFO = """
+## PostgreSQL (인구통계): gender, birth_year, region_major, marital_status, education_level, job_title_raw, income_household_monthly, car_ownership, smoking_experience, drinking_experience
 
-## 분류 카테고리 (우선순위 순서로 판단)
+## Qdrant (벡터 검색):
+- welcome_subjective_vectors: 주관식 답변 전체
+- qpoll_vectors_v2: 라이프스타일 설문 (ott_count, physical_activity, skincare_spending, ai_chatbot_used, stress_relief_method, travel_planning_style 등 40+ 카테고리)
+"""
 
-1. **objective_keywords** (PostgreSQL 필터링용 - 명확한 demographic 조건)
-   - 인구통계: 성별, 연령대(10대/20대/30대/40대/50대/60대 이상), 지역(시도 단위)
-   - 명확한 속성: 결혼여부, 학력, 직업, 직무, 소득, 가족수, 자녀수
-   - 소유 여부: 휴대폰 브랜드, 차량 보유 여부, 차량 제조사
-   - 경험 여부: 흡연, 음주, 전자담배
-   - **중요**: '젊은층'(20~30대), 'MZ세대'(20~30대), '중장년층'(40~50대) 등도 여기 포함
-   - 예시: "서울", "20대", "여성", "기혼", "대졸", "사무직", "아이폰"
+# 3. 시스템 프롬프트 (수정됨: {{QUERY}} 위치 명시 및 JSON 포맷 최적화)
+SYSTEM_PROMPT_V2 = """
+당신은 자연어 쿼리를 분석하여 **"정형 필터(SQL)"**와 **"의미 검색 조건(Vector Search)"**으로 완벽하게 분리하는 **Search Query Analyzer**입니다.
 
-2. **must_have_keywords** (벡터 검색 - 엄격 검증용, 반드시 충족해야 함)
-   - 사용자가 **명시적으로 요구한 행동, 경험, 태도, 라이프스타일**
-   - 키워드 패턴: "~하는 사람", "~을/를 이용하는", "~을/를 하는", "~이 있는"
-   - **정확히 일치해야 하는 주관적 조건**
-   - **중요 제외 패턴**: "선호하는", "좋아하는", "관심있는", "원하는"은 **Preference**로 분류
-   - **중요**: 대표 키워드 1개만 생성 (동의어 생성 금지, 테이블 헤더 표시 및 매핑 규칙 적용을 위함)
-   - 예시: 
-     * "OTT 이용" (동의어 생성 금지)
-     * "헬스장 다니는" (동의어 생성 금지)
-     * "해외여행 경험" (동의어 생성 금지)
+## ⚠️ 절대 주의사항
+1. 위 예시(Examples)의 데이터(나이, 성별, 키워드)를 그대로 베끼지 마십시오.
+2. 반드시 아래 제공되는 **[사용자 쿼리]**의 내용만 분석하십시오.
+3. 쿼리에 언급되지 않은 조건(성별, 나이 등)을 임의로 생성하지 마십시오.
 
-3. **preference_keywords** (벡터 검색 - 선호도용, 있으면 좋은 조건)
-   - 명시적이지 않지만 **선호하면 좋은 추상적 개념, 가치관, 성향**
-   - **"선호하는", "좋아하는", "관심있는", "원하는" 등의 표현 포함**
-   - 쿼리에서 암묵적으로 드러나는 특성
-   - must_have와 명확히 구분: 필수가 아닌 선호 조건
-   - 예시: "가성비", "워라밸", "환경보호", "자기계발", "트렌디한", "가전제품", "패션"
+## 🎯 목표
+사용자의 질문에서 **'누구(Who)'**에 해당하는 인구통계학적 조건과 **'무엇(What)'**에 해당하는 행동/성향/경험 조건을 명확히 분리하여 구조화된 JSON으로 반환합니다.
 
-4. **negative_keywords** (제외할 조건 - 명확한 부정 표현)
-   - 사용자가 **명시적으로 제외하길 원하는 조건**
-   - 키워드 패턴: "~하지 않는", "~을/를 안 하는", "~이 없는", "~제외", "~빼고"
-   - 예시: "OTT 미이용", "비흡연자", "차량 없는", "결혼 안 한"
+## 🛠️ 수행 작업 정의
 
-## 분류 원칙
-- **정확성 우선**: 애매하면 must_have보다 preference로 분류
-- **대표 키워드만 사용**: must_have는 대표 키워드 1개만 생성 (동의어 생성 금지)
-- **중복 제거**: 같은 의미는 한 카테고리에 한 번만 포함
-- **negative_keywords는 사용자가 명시한 것만**: must_have_keywords에 대해 자동으로 negative_keywords를 생성하지 마세요
-- **부정 명확화**: "~하지 않는"은 반드시 negative_keywords로 분류
+### 1. Demographic Filters (SQL 필터)
+- **대상**: 나이, 성별, 거주지역, 결혼여부, 자녀수, 직업, 소득, 휴대폰 기종, 차량 보유 여부 등 **객관적이고 명확한 프로필 정보**.
+- **규칙**: 쿼리에 명시된 내용만 추출합니다. (추론 금지)
+- **예시**: "20대", "서울 거주", "아이폰 유저", "미혼"
 
-출력 (순수 JSON만, 코드 블록 없이)
+### 2. Semantic Conditions (의미 검색 - 핵심!)
+- **대상**: 취미, 습관, 선호도, 라이프스타일, 경험, 가치관, 고민 등 **주관적이거나 행동에 관련된 모든 표현**.
+- **규칙**: 인구통계가 아닌 모든 명사/동사 구문은 이곳으로 분류해야 합니다.
+- **중요**: "OTT를 보는", "운동을 즐기는", "야식을 먹는", "스트레스 받는" 등은 절대 필터가 아닌 **Semantic Condition**입니다.
+- **속성 정의**:
+  - `original_keyword`: 사용자 쿼리 그대로의 표현 (예: "OTT 이용")
+  - `expanded_queries`: 라우터 매칭을 돕기 위한 3~4개의 구체적인 문장형 동의어. (예: "넷플릭스나 유튜브를 자주 시청한다", "동영상 스트리밍 서비스를 구독 중이다")
+  - `importance`: 0.9(필수/핵심주제), 0.7(중요조건), 0.5(단순선호)
+
+---
+## 📋 DB 스키마 정보 (참고용)
+{schema}
+---
+
+## 💡 Few-Shot 예시
+
+### 예시 1: 복합 조건 (필터 + 의미)
+**쿼리**: "서울 경기 사는 20대 남성 중 OTT를 즐겨 보고 주말에 배달음식 시켜먹는 사람 30명"
+**분석 결과**:
 {
-  "objective_keywords": ["필터링1", "필터링2"],
-  "must_have_keywords": ["필수조건1"],
-  "preference_keywords": ["선호1", "선호2"],
-  "negative_keywords": ["제외1"],
-  "limit": <숫자>
-}
-
-## 중요 규칙:
-1. 사용자가 명시적으로 언급한 주제만 must_have_keywords와 preference_keywords에 포함하세요.
-2. 인구통계 정보(예: "20대", "남성", "서울")만으로는 절대 주제(예: "차종", "패션")를 추론하지 마세요.
-
-쿼리: "서울, 경기 지역에 사는 OTT를 이용하는 젊은층 30명"
-{
-  "objective_keywords": ["서울", "경기", "젊은층"],
-  "must_have_keywords": ["OTT 이용"],
-  "preference_keywords": [],
-  "negative_keywords": ["OTT 미이용", "OTT 안보는", "스트리밍 서비스 미사용"],
+  "demographic_filters": {
+    "region_major": ["서울", "경기"],
+    "age_range": [20, 29],
+    "gender": ["남성"]
+  },
+  "semantic_conditions": [
+    {
+      "id": "cond_1",
+      "original_keyword": "OTT를 즐겨 보고",
+      "importance": 0.9,
+      "expanded_queries": ["넷플릭스, 왓챠 등 OTT 서비스를 자주 이용한다", "주말에 동영상 스트리밍을 몰아본다", "OTT 구독료를 지출한다"],
+      "search_strategy": "category_specific"
+    },
+    {
+      "id": "cond_2",
+      "original_keyword": "주말에 배달음식 시켜먹는",
+      "importance": 0.7,
+      "expanded_queries": ["배달 앱을 자주 사용한다", "주말 식사를 주로 배달 음식으로 해결한다", "배달의민족이나 요기요를 이용한다"],
+      "search_strategy": "category_specific"
+    }
+  ],
+  "logic_structure": {"operator": "AND", "children": [{"operator": "LEAF", "condition_id": "cond_1"}, {"operator": "LEAF", "condition_id": "cond_2"}]},
+  "search_strategy_recommendation": {"strategy": "balanced"},
   "limit": 30
 }
 
-## 예시 2: objective + must_have + preference (복합 조건)
-쿼리: "30대 여성 중 헬스장 다니고 가성비 중시하는 사람 50명"
+### 예시 2: 의미 조건만 있는 경우
+**쿼리**: "여름 휴가 계획이 있는 사람 찾아줘"
+**분석 결과**:
 {
-  "objective_keywords": ["30대", "여성"],
-  "must_have_keywords": ["헬스장 다니는"],
-  "preference_keywords": ["가성비", "비용 효율", "가격 민감도"],
-  "negative_keywords": ["운동 안하는", "헬스장 안가는", "비활동적인"],
+  "demographic_filters": {},
+  "semantic_conditions": [
+    {
+      "id": "cond_1",
+      "original_keyword": "여름 휴가 계획",
+      "importance": 0.9,
+      "expanded_queries": ["올해 여름 휴가를 떠날 예정이다", "해외 여행이나 국내 여행 계획이 있다", "휴가철 여행지를 알아보고 있다"],
+      "search_strategy": "category_specific"
+    }
+  ],
+  "logic_structure": {"operator": "LEAF", "condition_id": "cond_1"},
+  "search_strategy_recommendation": {"strategy": "semantic_first"},
   "limit": 50
 }
 
-## 예시 3: objective + preference only (must_have 없는 경우 - 중요!)
-쿼리: "30대 여성이 선호하는 가전제품"
+---
+
+## 📤 출력 형식 (JSON Only)
+```json
 {
-  "objective_keywords": ["30대", "여성"],
-  "must_have_keywords": [],
-  "preference_keywords": ["가전제품"],
-  "negative_keywords": [],
-  "limit": 100
+  "demographic_filters": { ... },
+  "semantic_conditions": [ ... ],
+  "logic_structure": { ... },
+  "exclude_conditions": [],
+  "search_strategy_recommendation": { ... },
+  "limit": <number>
 }
 
-
-사용자 쿼리:
+*** 실제 분석 대상 *** 
+사용자 쿼리: 
 <query>
 {{QUERY}}
-</query>
-사용자가 명시적으로 질문하거나 언급한 주제(예: "OTT", "헬스장")가 없다면, 인구통계 정보(예: "20대 남성")만으로 관련 주제(예: "차종", "패션")를 추론하여 must_have_keywords나 preference_keywords에 추가하지 마세요.
+</query> 
 """
 
-    logging.info(f"🔄 LLM 호출 중...")
 
-    limit_value = None
+@lru_cache(maxsize=256)
+def parse_query_intelligent(query: str) -> Dict[str, Any]:
+   """ 쿼리를 지능적으로 파싱하여 구조화된 검색 조건 생성 """ 
+   if CLAUDE_CLIENT is None:
+       raise RuntimeError("Claude 클라이언트가 초기화되지 않았습니다.")
+   
+   logging.info(f"🔄 LLM Parser v2 호출 중: {query}")
+
+   # 프롬프트 생성 (schema는 단순 문자열 치환, QUERY는 사용자 입력 치환)
+   prompt = SYSTEM_PROMPT_V2.replace("{{QUERY}}", query).replace("{schema}", DB_SCHEMA_INFO)
+
+   try:
+       messages = [
+           SystemMessage(content=prompt),
+           HumanMessage(content="Analyze the query and provide structured search conditions in JSON.")
+       ]
+       
+       response = CLAUDE_CLIENT.invoke(messages)
+       text_output = response.content.strip()
+       logging.info(f"🤖 Claude LLM 원본 응답:\n---\n{text_output}\n---")
+       
+       # JSON 추출 (마크다운 코드 블록 제거)
+       json_match = re.search(r'```(?:json)?\s*({.*?})\s*```', text_output, re.DOTALL)
+       if json_match:
+           json_str = json_match.group(1)
+       else:
+           json_match = re.search(r'({.*})', text_output, re.DOTALL)
+           if json_match:
+               json_str = json_match.group(1)
+           else:
+               json_str = text_output
+       
+       parsed = json.loads(json_str)
+       
+       # 기본값 설정 및 반환 구조 생성
+       result = {
+           'demographic_filters': parsed.get('demographic_filters', {}),
+           'semantic_conditions': parsed.get('semantic_conditions', []),
+           'logic_structure': parsed.get('logic_structure', {'operator': 'AND', 'children': []}),
+           'exclude_conditions': parsed.get('exclude_conditions', []),
+           'search_strategy_recommendation': parsed.get('search_strategy_recommendation', {
+               'strategy': 'balanced',
+               'use_collections': ['welcome_subjective_vectors', 'qpoll_vectors_v2']
+           }),
+           'limit': parsed.get('limit', 100),
+           'query_intent': parsed.get('query_intent', {})
+       }
+       
+       logging.debug(f"✅ LLM Parser v2 완료")
+       logging.info(f"  - Demographic filters: {result['demographic_filters']}")
+       intent_keywords = [c.get('original_keyword', '') for c in result['semantic_conditions']]
+       logging.info(f"  - Semantic conditions: {intent_keywords}")
+
+       # 🔍 디버깅: Semantic Conditions 상세 정보 출력 (DEBUG 레벨)
+       if result['semantic_conditions']:
+           logging.debug("="*60)
+           logging.debug("🔍 [디버깅] Semantic Conditions 상세 정보:")
+           for idx, cond in enumerate(result['semantic_conditions'], 1):
+               logging.debug(f"  [{idx}] original_keyword: {cond.get('original_keyword')}")
+               logging.debug(f"      importance: {cond.get('importance')}")
+               logging.debug(f"      search_strategy: {cond.get('search_strategy')}")
+               expanded = cond.get('expanded_queries', [])
+               if expanded:
+                   logging.debug(f"      expanded_queries:")
+                   for exp_idx, exp_q in enumerate(expanded, 1):
+                       logging.debug(f"        {exp_idx}. {exp_q}")
+           logging.debug("="*60)
+       
+       return result
+       
+   except json.JSONDecodeError as je:
+       logging.error(f"❌ JSON 파싱 실패: {je.msg}. 원본: {text_output}")
+       raise RuntimeError(f"Claude 응답 파싱 실패: {je.msg}")
+   except Exception as e:
+       logging.error(f"❌ Claude 호출 실패: {e}", exc_info=True)
+       raise RuntimeError(f"Claude 호출 실패: {e}")
+
+
+def extract_limit_from_query(query: str) -> Optional[int]:
+    """쿼리에서 인원 수 추출"""
     all_limit_matches = re.findall(r'(\d+)\s*명', query)
     if all_limit_matches:
         try:
-            limit_value = int(all_limit_matches[-1])
-            logging.info(f"💡 인원 수 감지: {limit_value}명")
+            return int(all_limit_matches[-1])
         except ValueError:
             pass
-
-    try:
-        messages = [
-            SystemMessage(content=system_prompt.replace("{{QUERY}}", query)),
-            HumanMessage(content="Analyze the query and provide JSON output.")
-        ]
-        response = CLAUDE_CLIENT.invoke(messages)
-        text_output = response.content.strip()
-
-        json_match = re.search(r'```(?:json)?\s*({.*?})\s*```', text_output, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            json_match = re.search(r'({.*})', text_output, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(1)
-            else:
-                json_str = text_output
-
-        parsed = json.loads(json_str)
-
-        result = {
-            'objective_keywords': list(set(parsed.get('objective_keywords', []))),
-            'must_have_keywords': list(set(parsed.get('must_have_keywords', []))),
-            'preference_keywords': list(set(parsed.get('preference_keywords', []))),
-            'negative_keywords': list(set(parsed.get('negative_keywords', []))),
-            'limit': limit_value or parsed.get('limit')
-        }
-
-        logging.info(f"✅ LLM 분류 완료")
-        return result
-
-    except json.JSONDecodeError as je:
-        logging.error(f"❌ JSON 파싱 실패: {je.msg}. 원본: {json_str}")
-        raise HTTPException(status_code=500, detail=f"Claude 응답 파싱 실패: {je.msg}")
-    except Exception as e:
-        logging.error(f"Claude 호출 실패: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Claude 호출 실패: {e}") from e
+    return None

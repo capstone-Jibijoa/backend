@@ -91,4 +91,5 @@ main.py ─────┬──> hybrid_logic.py (1. 질의 분리)
 #### 2. API 서버 실행
 ```bash
 uvicorn main:app --reload
+uvicorn main:app --reload --log-config log_config.json
 ```

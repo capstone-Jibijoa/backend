@@ -336,3 +336,56 @@ def get_field_mapping(keyword: str) -> Optional[Dict[str, Any]]:
         "description": keyword, 
         "type": "unknown"
     }
+
+# Q-Poll 주제 ID와 답변 생성 템플릿 매핑
+QPOLL_ANSWER_TEMPLATES = {
+    "physical_activity": "체력 관리를 위해 {answer_str} 활동을 하고 있다.",
+    "ott_count": "현재 OTT서비스를 {answer_str}이용 중이다.",
+    "traditional_market_freq": "전통시장을 {answer_str}방문한다.",
+    "lunar_new_year_gift_pref": "가장 선호하는 설 선물 유형은 {answer_str}이다.",
+    "elementary_winter_memories": "초등학생 시절 겨울방학 때 가장 기억에 남는 일은 {answer_str}(이)다.",
+    "pet_experience": "{answer_str}.",
+    "moving_stress_factor": "이사할 때 {answer_str}(으)로 가장 스트레스 받는다.",
+    "happiest_self_spending": "본인을 위해 소비하는 것 중 가장 기분 좋아지는 소비는 {answer_str}이 다.",
+    "most_used_app": "요즘 가장 많이 사용하는 앱은 {answer_str}이다.",
+    "stress_situation": "{answer_str}에서 스트레스를 가장 많이 느낀다.",
+    "stress_relief_method": "스트레스를 해소하는데 주로 사용하는 방법은 {answer_str}이다.",
+    "skin_satisfaction": "현재 본인의 피부 상태에 {answer_str}.",
+    "skincare_spending": "한 달 기준으로 스킨케어 제품에 평균 {answer_str}만큼 소비한다.",
+    "skincare_purchase_factor": "스킨케어 제품을 구매할 떄 가장 중요하게 생각하는 요소는 {answer_str}이다.",
+    "ai_chatbot_used": "사용해 본 AI 챗봇 서비스는 {answer_str}이다.",
+    "ai_chatbot_main": "사용해 본 AI 챗봇 서비스 중 주로 사용하는 것은 {answer_str}이다.",
+    "ai_chatbot_purpose": "AI 챗봇 서비스를 주로 {answer_str} 용도로 활용하였거나, 앞으로 활용하고 싶다.",
+    "ai_chatbot_sentiment": "ChatGPT와 딥시크 중 {answer_str}에 더 호감이 간다.",
+    "overseas_travel_pref": "올해 해외여행을 {answer_str}(으)로 가고 싶다.",
+    "fast_delivery_usage": "빠른 배송(당일·새벽·직진 배송) 서비스를 주로 {answer_str}을 구매할 때 이용한다.",
+    "summer_worry": "다가오는 여름철 {answer_str}이(가) 가장 걱정된다.",
+    "unused_item_disposal": "버리기 아까운 물건이 있을 때, 주로 {answer_str}한다.",
+    "alarm_setting_style": "아침에 기상하기 위해 {answer_str}.",
+    "eating_alone_frequency": "외부 식당에서 식사를 {answer_str} 한다.",
+    "happy_old_age_condition": "가장 중요한 행복한 노년의 조건은 {answer_str}이다.",
+    "sweat_discomfort": "여름철 땀 때문에 {answer_str}는 불편함이 있다.",
+    "most_effective_diet": "지금까지 해본 다이어트 중 {answer_str}가 가장 효과 있었다.",
+    "late_night_snack_method": "야식을 먹을 때 보통 {answer_str}.",
+    "favorite_summer_snack": "여름철 최애 간식은 {answer_str}이다.",
+    "recent_major_spending": "최근 가장 지출을 많이 한 곳은 {answer_str}이다.",
+    "ai_service_usage_area": "요즘 {answer_str} 분야에서 AI 서비스를 활용하고 있다.",
+    "minimalist_maximalist": "나는 {answer_str}에 더 가깝다.",
+    "travel_planning_style": "여행갈 때 {answer_str} 스타일에 더 가깝다.",
+    "plastic_bag_reduction_effort": "평소 일회용 비닐봉투 사용을 줄이기 위해 {answer_str}.",
+    "point_benefit_attention": "할인, 캐시백, 멤버십 등 포인트 적립 혜택을 {answer_str}.",
+    "chocolate_consumption_time": "초콜릿을 주로 {answer_str} 먹는다.",
+    "personal_info_protection_habit": "평소 개인정보보호를 위해 {answer_str}.",
+    "summer_fashion_must_have": "절대 포기할 수 없는 여름 패션 필수탬은 {answer_str} 이다.",
+    "no_umbrella_reaction": "갑작스런 비로 우산이 없을 때 {answer_str}.",
+    "most_saved_photo_type": "휴대폰 갤러리에 가장 많이 저장되어져 있는 사진은 {answer_str}이다.",
+    "favorite_summer_water_spot": "여름철 물놀이 장소로 가장 선호하는 곳은 {answer_str}이다.",
+}
+
+# [추가] 질문 필드별 '부정/제외' 의미를 가진 키워드 정의
+NEGATIVE_ANSWER_KEYWORDS = {
+    "moving_stress_factor": ["스트레스 받지 않는다", "없다", "딱히 없다", "신경 안 쓴다", "모르겠다", "상관 없다"],
+    "ott_count": ["이용 안 함", "없음", "0개", "보지 않음"],
+    "pet_experience": ["없다", "키워본 적 없다", "비반려인"],
+    "summer_worry": ["걱정 없다", "없음", "별로 없다"],
+}
