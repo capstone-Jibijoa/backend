@@ -44,6 +44,7 @@ app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://main.dl33xtoyrvsye.amplifyapp.com/"
 ]
 
 app.add_middleware(
