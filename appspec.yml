@@ -4,6 +4,8 @@ os: linux
 files:
   - source: scripts/
     destination: /home/ec2-user/codedeploy/scripts
+  - source: IMAGE_TAG.txt
+    destination: /home/ec2-user/codedeploy/scripts/IMAGE_TAG.txt
 
 hooks:
   BeforeInstall:
