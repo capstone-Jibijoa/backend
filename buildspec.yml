@@ -1,5 +1,4 @@
 version: 0.2
-
 phases:
   pre_build:
     commands:
@@ -30,19 +29,17 @@ phases:
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
       
-      # IMAGE_TAG를 파일로 저장 (루트 디렉토리)
+      # IMAGE_TAG를 파일로 저장 (scripts 디렉토리)
       - echo "Saving IMAGE_TAG to file..."
-      - echo "${COMMIT_HASH}" > IMAGE_TAG.txt
-      - cat IMAGE_TAG.txt
+      - echo "${COMMIT_HASH}" > scripts/IMAGE_TAG.txt
+      - cat scripts/IMAGE_TAG.txt
       
       # 스크립트 파일 확인 및 권한 부여
       - echo "Preparing deployment scripts..."
       - ls -la
       - ls -la scripts/ 2>/dev/null || echo "scripts directory not found"
       - chmod +x scripts/*.sh 2>/dev/null || true
-
 artifacts:
   files:
     - appspec.yml
-    - IMAGE_TAG.txt
     - scripts/**/*
