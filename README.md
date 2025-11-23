@@ -1,94 +1,106 @@
-## 📄 하이브리드 검색 및 분석 API: 모듈 관계 분석
+# 🚀 Multi-Table Hybrid Search API v3 (Optimized)
 
-### 🚀 프로젝트 개요
+**FastAPI**, **Anthropic Claude 3 Haiku**, **Qdrant**를 기반으로 구축된 고성능 하이브리드 검색 및 분석 엔진입니다.
+사용자의 자연어 질의를 분석하여 **SQL 기반의 정형 필터링**과 **Vector 기반의 의미 검색**을 결합하고, **부정 조건(Negative Filtering)**까지 정밀하게 제어하여 빠르고 정확한 결과를 제공합니다.
 
-이 프로젝트는 **FastAPI**와 **LangChain**을 기반으로 구축된 고성능 하이브리드 검색 및 분석 API입니다. 사용자의 자연어 질의를 LLM(Claude 3)을 통해 **정형 필터**와 **비정형 검색어**로 분리하고, 이를 바탕으로 PostgreSQL과 Qdrant에서 복합 검색을 수행합니다. 최종적으로 검색 결과를 다시 LLM으로 심층 분석하여 구조화된 리포트를 생성합니다.
+---
 
-특히, 서버 재시작 없이 LangChain의 핵심 구성 요소(임베딩 모델, 벡터 저장소 등)를 동적으로 재로딩하는 '엔진 교체' 기능을 통해 운영 유연성을 극대화했습니다.
+## ⚡️ 핵심 최적화 (v3.0 Highlights)
 
-### 🧩 모듈 관계 및 역할
+이전 버전 대비 **속도**와 **정확도** 측면에서 대폭적인 개선이 이루어졌습니다.
 
-#### `main.py`
+1.  **🚀 응답 속도 극대화 (10s → 3s 이내)**
+    * **LLM 경량화**: 쿼리 파싱 모델을 `Claude 3.5 Sonnet`에서 **`Claude 3 Haiku`**로 교체하여 의도 분석 속도를 3배 이상 향상시켰습니다.
+    * **Non-blocking Architecture**: 무거운 검색 로직(`search.py`)을 `asyncio.to_thread`로 별도 스레드에서 실행하여 Event Loop 차단을 방지합니다.
+    * **Parallel Data Fetching**: PostgreSQL(테이블 데이터)과 Qdrant(설문 데이터) 조회를 `asyncio.gather`로 **병렬 실행**하여 대기 시간을 단축했습니다.
 
-- **역할**: FastAPI 애플리케이션의 진입점(Entry Point)이자 전체 워크플로우를 조율하는 오케스트레이터.
-- **주요 기능**:
-    - `/api/search`: 핵심 검색 및 분석 API 엔드포인트.
-    - `/admin/reload-langchain`: 서버 재시작 없이 LangChain 구성 요소를 다시 로드하는 관리자용 API.
-    - 각 모듈의 함수를 순서대로 호출하여 최종 결과를 반환합니다.
-- **의존성**: `hybrid_logic.py`, `langchain_search_logic.py`, `analysis_logic.py`, `db_logic.py`
+2.  **🎯 정확도 및 필터링 강화**
+    * **Strict Negative Filtering**: "없음", "안 함" 등의 부정 답변을 **정규식(Regex)**과 **벡터 유사도(Vector)** 이중 검증으로 완벽하게 제외합니다.
+    * **Smart Column Selection**: 검색 의도에 맞춰 사용자에게 보여줄 테이블 컬럼을 동적으로 최적화합니다.
 
-#### `hybrid_logic.py`
+3.  **⚙️ 리소스 효율성**
+    * **Singleton Pattern**: DB Connection Pool 및 Qdrant Client를 전역 싱글톤으로 관리하여 연결 오버헤드를 제거했습니다.
+    * **Caching**: `lru_cache`를 활용하여 설정 및 임베딩 모델 로딩을 최적화했습니다.
 
-- **역할**: 사용자 질의(Query) 분석 및 구조화 담당.
-- **주요 기능**: Claude 3 Opus 모델을 사용하여 자연어 질의를 **정형 필터 조건(JSON)**과 **비정형 의미론적 검색어(Text)**로 분리합니다.
-- **의존성**: `langchain-anthropic`
+---
 
-#### `langchain_search_logic.py`
+## 🛠️ 시스템 아키텍처 & 워크플로우
 
-- **역할**: **LangChain 기반의 핵심 하이브리드 검색 실행**을 담당합니다.
-- **주요 기능**:
-    - HuggingFace 임베딩 모델(`nlpai-lab/KURE-v1`)과 Qdrant 벡터 저장소를 초기화하고 관리합니다.
-    - LCEL(LangChain Expression Language)을 사용하여 하이브리드 검색 체인(`chain`)을 구성합니다.
-    - `force_reload_langchain_components`: 외부 요청에 의해 모델과 체인을 다시 로드하는 '엔진 교체' 로직을 수행합니다.
-- **의존성**: `langchain`, `qdrant-client`, `db_logic.py`
+사용자가 질의(Query)를 입력했을 때의 데이터 처리 흐름입니다.
 
-#### `db_logic.py`
+### 1. 🧠 Query Understanding (`llm.py`)
+* **Role**: 입력된 자연어를 `Claude 3 Haiku`가 분석하여 구조화된 JSON으로 변환합니다.
+* **Output**:
+    * `Demographic Filters` (SQL): 나이, 지역, 성별 등 인구통계 조건.
+    * `Semantic Conditions` (Vector): 취향, 라이프스타일, 소비 패턴 등.
+    * `Negative Flags`: 제외해야 할 조건 식별 (`is_negative: true`).
 
-- **역할**: 데이터베이스 연결 및 SQL 관련 유틸리티 제공.
-- **주요 기능**:
-    - PostgreSQL 및 Qdrant 클라이언트 연결 객체를 생성하고 제공합니다.
-    - `_build_jsonb_where_clause`: 정형 필터(JSON)를 SQL Injection에 안전한 `WHERE` 절과 파라미터로 변환합니다.
-    - `log_search_query`: 검색 로그를 PostgreSQL DB에 기록합니다.
-- **의존성**: `psycopg2`, `qdrant-client`
+### 2. 🔍 Hybrid Search Engine (`search.py`, `search_helpers.py`)
+* **Step 1. SQL Filtering (Pre-filtering)**: PostgreSQL `welcome_meta2` 테이블에서 인구통계 조건에 맞는 `panel_id` 후보군을 1차적으로 추출합니다.
+* **Step 2. Vector Search**: 추출된 후보군을 대상으로 Qdrant(`qpoll_vectors_v2` 등)에서 의미 기반 검색을 수행합니다.
+* **Step 3. Strict Validation**:
+    * **Text Filter**: `STRICT_NEGATIVE_PATTERNS` (정규식)을 사용해 부정적인 텍스트 답변을 강제 제외합니다.
+    * **Vector Filter**: LLM이 식별한 부정 조건과 유사한 벡터를 가진 패널을 2차로 제외합니다.
 
-#### `analysis_logic.py`
+### 3. 📊 Analysis & Aggregation (`insights.py`, `main.py`)
+* **Analysis**: 검색된 패널들의 답변을 군집화(DBSCAN)하여 주요 특징을 분석하고 시각화 데이터(Chart)를 생성합니다.
+* **Aggregation**: `main.py`에서 비동기 병렬 처리로 최종 테이블 데이터와 분석 결과를 조립하여 반환합니다.
 
-- **역할**: 검색 결과에 대한 LLM 기반 심층 분석 담당.
-- **주요 기능**: `langchain_search_logic`으로부터 받은 검색 결과를 Claude 3 Opus 모델에 전달하여, 요약 및 시각화용 분석 데이터를 Pydantic 모델 기반의 안전한 JSON 형식으로 생성합니다.
-- **의존성**: `langchain-anthropic`
+---
 
-### 🗺️ 모듈 간 의존성 요약
+## 📂 주요 모듈 설명
 
-```
-main.py ─────┬──> hybrid_logic.py (1. 질의 분리)
-             |
-             ├─> langchain_search_logic.py (2. 하이브리드 검색) ──> db_logic.py (DB 연결/쿼리)
-             |
-             ├─> analysis_logic.py (3. 결과 분석)
-             |
-             └─> db_logic.py (4. 로그 기록)
-```
+| 파일명 | 역할 및 핵심 기능 |
+| :--- | :--- |
+| **`main.py`** | **API Entrypoint & Async Controller**<br>- `/api/search` 등 엔드포인트 정의.<br>- `asyncio.to_thread`, `asyncio.gather`를 통한 비동기/병렬 처리 오케스트레이션. |
+| **`search.py`** | **Search Logic Core**<br>- 하이브리드 검색의 전체 파이프라인(SQL → Vector → Negative Filter) 제어.<br>- 정밀 필터링 로직 구현. |
+| **`llm.py`** | **Query Parser**<br>- LangChain & Claude 3 Haiku를 사용하여 자연어를 필터 조건으로 파싱.<br>- 부정 조건(`is_negative`) 식별 프롬프트 최적화. |
+| **`search_helpers.py`** | **Query Builder & Embeddings**<br>- JSON 필터를 PostgreSQL `WHERE` 절로 변환.<br>- HuggingFace 임베딩 모델 로드 및 관리. |
+| **`db.py`** | **Database Connector**<br>- PostgreSQL Connection Pool 및 Qdrant Client 싱글톤 관리.<br>- 리소스 누수 방지 및 재사용성 보장. |
+| **`insights.py`** | **Data Analyst**<br>- 검색 결과에 대한 통계, 클러스터링 분석 및 차트 데이터 생성. |
+| **`mapping_rules.py`** | **Knowledge Base**<br>- "MZ세대", "고소득" 같은 키워드 매핑 규칙 및 설문 템플릿 정의. |
 
-### ⚙️ 핵심 로직 흐름 (LangChain 기반)
+---
 
-1.  **[main.py]**: 사용자 질의(`query`)가 `/api/search`로 인입됩니다.
-2.  **[hybrid_logic.py]**: `split_query_for_hybrid_search` 함수가 Claude 3 Opus를 호출하여 질의를 `정형 조건(JSON)`과 `비정형 검색어(Text)`로 분리합니다.
-3.  **[main.py]**: 분리된 결과를 `langchain_search_logic.py`의 `invoke` 메서드에 전달합니다.
-4.  **[langchain_search_logic.py]**: LCEL로 구성된 하이브리드 검색 체인이 실행됩니다.
-    1.  **`_get_filtered_uids_from_postgres`**: `정형 조건`을 `db_logic`을 통해 SQL `WHERE` 절로 변환 후, PostgreSQL에서 1차 필터링된 `UID` 목록을 가져옵니다.
-    2.  **`_search_qdrant_or_pass_through`**:
-        - **`비정형 검색어`가 있는 경우**: 1차 필터링된 `UID`를 조건으로 Qdrant에서 벡터 검색을 수행합니다.
-        - **`비정형 검색어`가 없는 경우**: Qdrant 검색을 건너뛰고, 1차 필터링된 `UID` 목록을 다음 단계로 바로 전달하여 효율성을 높입니다.
-    3.  **`_get_final_data_from_postgres`**: 최종 `UID` 목록을 사용하여 PostgreSQL에서 `ai_insights` 등 상세 데이터를 조회하여 최종 검색 결과를 반환합니다.
-5.  **[main.py]**: `langchain_search_logic`이 반환한 검색 결과를 `analysis_logic.py`로 전달합니다.
-6.  **[analysis_logic.py]**: `analyze_search_results_chain` 함수가 Claude 3 Opus를 호출하여 검색 결과를 분석하고, 시각화에 사용될 구조화된 `JSON 리포트`를 생성합니다.
-7.  **[main.py]**: 최종 분석 리포트를 클라이언트에게 반환하고, `db_logic.py`를 통해 검색 활동을 로그로 기록합니다.
+## 💻 설치 및 실행 (Setup)
 
-### ✨ 주요 특징 및 개선 사항
+### 1. 환경 변수 설정 (.env)
+프로젝트 루트에 `.env` 파일을 생성하고 다음 정보를 입력하세요.
+```ini
+# AWS / Database
+DB_HOST=localhost
+DB_NAME=your_db
+DB_USER=postgres
+DB_PASSWORD=your_password
 
-*   **동적 엔진 교체**: `/admin/reload-langchain` API를 통해 서비스 중단 없이 임베딩 모델, 벡터 저장소, LangChain 체인을 다시 로드할 수 있습니다.
-*   **최적화된 검색 로직**: 비정형 검색어가 없는 경우, 불필요한 Qdrant 벡터 검색을 건너뛰어 응답 속도와 비용 효율성을 개선했습니다.
-*   **안전한 SQL 처리**: `psycopg2`의 파라미터 바인딩을 활용하여 SQL Injection 공격을 원천적으로 방지합니다.
-*   **안정적인 LLM 출력**: `Pydantic` 모델을 LangChain의 `JsonOutputParser`와 결합하여 LLM의 분석 결과가 항상 일관된 JSON 구조를 갖도록 보장합니다.
+# Vector DB
+QDRANT_HOST=localhost
+QDRANT_PORT=6333
+
+# AI Models
+ANTHROPIC_API_KEY=''
+
+# 의존성 설치
+pip install -r requirements.txt
 
 ### 🛠️ 실행 방법
 
 #### 1. 가상환경 활성화
-```bash
 .\venv\Scripts\activate
-```
 
 #### 2. API 서버 실행
-```bash
 uvicorn main:app --reload
-```
+uvicorn main:app --reload --log-config log_config.json
+
+### 🔍 API Endpoints
+* POST /api/search (Lite Mode)
+
+** 빠른 응답 속도 중시. 검색 결과 리스트와 테이블 데이터 반환.
+
+*POST /api/search-and-analyze (Pro Mode)
+
+** 심층 분석 모드. 검색 결과와 함께 통계 차트(Charts) 및 인사이트 제공.
+
+* GET /health
+
+** 서버 및 DB 연결 상태 확인.

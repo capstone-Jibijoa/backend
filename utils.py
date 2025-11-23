@@ -1,11 +1,9 @@
 import logging
-import datetime
 from collections import Counter
 from typing import List, Dict, Any, Tuple
-from db import get_db_connection_context # 수정된 import
+from db import get_db_connection_context 
 import datetime
 
-# 이 맵은 analysis.py와 utils.py 모두에서 사용됩니다.
 WELCOME_OBJECTIVE_FIELDS = [
     ("gender", "성별"),
     ("birth_year", "연령대"),

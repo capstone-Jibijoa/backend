@@ -1,5 +1,10 @@
 # Created by venv; see https://docs.python.org/3/library/venv.html
 
+welcome_data.json/
+
+# test 폴더
+test/
+
 # 가상환경 폴더
 venv/
 
