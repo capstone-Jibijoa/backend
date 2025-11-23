@@ -21,13 +21,14 @@ phases:
     commands:
       # Docker 이미지 빌드
       - echo "Building Docker image..."
-      - docker build -t ${ECR_URI}:${COMMIT_HASH} .
+      - docker build -t ${ECR_URI}:${COMMIT_HASH} -t ${ECR_URI}:latest .
       
   post_build:
     commands:
       # ECR 푸시
       - echo "Pushing image to ECR..."
       - docker push ${ECR_URI}:${COMMIT_HASH}
+      - docker push ${ECR_URI}:latest
       
       # IMAGE_TAG를 파일로 저장 (scripts 디렉토리)
       - echo "Saving IMAGE_TAG to file..."
