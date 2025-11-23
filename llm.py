@@ -13,7 +13,7 @@ load_dotenv()
 # 1. Claude 클라이언트 설정
 try:
     # API Key는 환경변수(.env)에서 자동으로 로드됩니다.
-    CLAUDE_CLIENT = ChatAnthropic(model="claude-sonnet-4-5", temperature=0.1)
+    CLAUDE_CLIENT = ChatAnthropic(model="claude-3-haiku-20240307", temperature=0.1)
 except Exception as e:
     CLAUDE_CLIENT = None
     logging.error(f"Anthropic 클라이언트 생성 실패: {e}")
@@ -30,111 +30,65 @@ DB_SCHEMA_INFO = """
 
 # 3. 시스템 프롬프트 (수정됨: {{QUERY}} 위치 명시 및 JSON 포맷 최적화)
 SYSTEM_PROMPT_V2 = """
-당신은 자연어 쿼리를 분석하여 **"정형 필터(SQL)"**와 **"의미 검색 조건(Vector Search)"**으로 완벽하게 분리하는 **Search Query Analyzer**입니다.
+You are a Search Query Analyzer. Parse the query into "Demographic Filters (SQL)" and "Semantic Conditions (Vector)".
 
-## ⚠️ 절대 주의사항
-1. 위 예시(Examples)의 데이터(나이, 성별, 키워드)를 그대로 베끼지 마십시오.
-2. 반드시 아래 제공되는 **[사용자 쿼리]**의 내용만 분석하십시오.
-3. 쿼리에 언급되지 않은 조건(성별, 나이 등)을 임의로 생성하지 마십시오.
-
-## 🎯 목표
-사용자의 질문에서 **'누구(Who)'**에 해당하는 인구통계학적 조건과 **'무엇(What)'**에 해당하는 행동/성향/경험 조건을 명확히 분리하여 구조화된 JSON으로 반환합니다.
-
-## 🛠️ 수행 작업 정의
-
-### 1. Demographic Filters (SQL 필터 - 엄격한 기준)
-- **대상**: 
-    1. **기본 정보**: 나이(age), 성별(gender), 거주지역(region)
-    2. **가구 정보**: 결혼여부(marital_status), 가족수(family_size), 자녀수(children_count)
-    3. **사회경제**: 직업(job), 학력(education_level), 소득(income_personal, income_household)
-    4. **자산 보유**: **차량 보유 여부(car_ownership)** 
-- **제외 대상**: 흡연(smoking), 음주(drinking), 가전제품, 휴대폰 등은 데이터가 복잡하므로 Semantic Condition으로 분류하십시오.
-- **규칙**: 쿼리에 명시된 내용만 추출합니다.
-- **예시**: "20대", "서울 거주", "자차 보유", "차 없는"
-
-### 2. Semantic Conditions (의미 검색 - 유연한 기준)
-- **대상**: 
-    1. 취미, 습관, 선호도, 라이프스타일, 고민 등 주관적 내용
-    2. **흡연 여부, 음주 여부, 보유 가전제품, 자동차 모델** 등 구체적인 행동/소유 정보
-- **규칙**: 인구통계(나이/성별/지역/결혼/가족/직업)가 아닌 모든 명사/동사 구문은 이곳으로 분류해야 합니다.
-- **예시**: "흡연 경험이 있는", "술을 즐기는", "TV를 보유한", "다이어트 하는"
-- **중요**: "OTT를 보는", "운동을 즐기는", "야식을 먹는", "스트레스 받는" 등은 절대 필터가 아닌 **Semantic Condition**입니다.
-- **속성 정의**:
-  - `original_keyword`: 사용자 쿼리 그대로의 표현 (예: "OTT 이용")
-  - `expanded_queries`: 라우터 매칭을 돕기 위한 3~4개의 구체적인 문장형 동의어. (예: "넷플릭스나 유튜브를 자주 시청한다", "동영상 스트리밍 서비스를 구독 중이다")
-  - `importance`: 0.9(필수/핵심주제), 0.7(중요조건), 0.5(단순선호)
-
----
-## 📋 DB 스키마 정보 (참고용)
+## 📋 DB Schema
 {schema}
----
 
-## 💡 Few-Shot 예시
+## 🛠️ Extraction Rules
 
-### 예시 1: 복합 조건 (필터 + 의미)
-**쿼리**: "서울 경기 사는 20대 남성 중 OTT를 즐겨 보고 주말에 배달음식 시켜먹는 사람 30명"
-**분석 결과**:
+### 1. Demographic Filters (Strict SQL)
+Extract ONLY explicit matches for these fields:
+- **Basic**: `age` (convert to range), `gender`, `region` (e.g., Seoul, Gyeonggi).
+- **Social**: `marital_status`, `family_size`, `children_count`.
+- **Status**: `job`, `education_level`, `income_personal`, `income_household`.
+- **Asset**: `car_ownership` (Only 'have car' or 'no car').
+*Note: Do NOT infer missing data. Exclude smoking/drinking/appliances here.*
+
+### 2. Semantic Conditions (Vector Search)
+Extract all other subjective intents, hobbies, habits, and specific item ownerships (e.g., specific car model, phone type).
+- **Negative Handling**: Mark "don't", "no", "hate" (e.g., "안 하는", "없는") as **`is_negative: true`**.
+- **Expansion**: Generate 3 positive synonyms in `expanded_queries` even for negative conditions.
+- **Importance**: 0.9 (Core), 0.7 (Important), 0.5 (Optional).
+
+## 💡 Few-Shot Examples
+
+**Query**: "서울 경기 사는 20대 남성 중 OTT 즐겨 보고 주말에 배달음식 시켜먹는 사람 30명"
+**Output**:
 {
-  "demographic_filters": {
-    "region_major": ["서울", "경기"],
-    "age_range": [20, 29],
-    "gender": ["남성"]
-  },
+  "demographic_filters": { "region_major": ["서울", "경기"], "age_range": [20, 29], "gender": ["남성"] },
   "semantic_conditions": [
-    {
-      "id": "cond_1",
-      "original_keyword": "OTT를 즐겨 보고",
-      "importance": 0.9,
-      "expanded_queries": ["넷플릭스, 왓챠 등 OTT 서비스를 자주 이용한다", "주말에 동영상 스트리밍을 몰아본다", "OTT 구독료를 지출한다"],
-      "search_strategy": "category_specific"
-    },
-    {
-      "id": "cond_2",
-      "original_keyword": "주말에 배달음식 시켜먹는",
-      "importance": 0.7,
-      "expanded_queries": ["배달 앱을 자주 사용한다", "주말 식사를 주로 배달 음식으로 해결한다", "배달의민족이나 요기요를 이용한다"],
-      "search_strategy": "category_specific"
-    }
+    { "original_keyword": "OTT를 즐겨 보고", "is_negative": false, "importance": 0.9, "expanded_queries": ["넷플릭스나 유튜브를 자주 본다", "동영상 스트리밍 구독 중이다", "주말에 드라마 정주행한다"] },
+    { "original_keyword": "주말에 배달음식 시켜먹는", "importance": 0.7, "expanded_queries": ["배달 앱을 자주 쓴다", "요기요나 배민을 이용한다", "배달 음식을 선호한다"] }
   ],
-  "logic_structure": {"operator": "AND", "children": [{"operator": "LEAF", "condition_id": "cond_1"}, {"operator": "LEAF", "condition_id": "cond_2"}]},
-  "search_strategy_recommendation": {"strategy": "balanced"},
   "limit": 30
 }
 
-### 예시 2: 의미 조건만 있는 경우
-**쿼리**: "여름 휴가 계획이 있는 사람 찾아줘"
-**분석 결과**:
+**Query**: "경기도 사는 30대 중 고양이를 안 키우는 사람"
+**Output**:
 {
-  "demographic_filters": {},
+  "demographic_filters": { "region_major": ["경기"], "age_range": [30, 39] },
   "semantic_conditions": [
-    {
-      "id": "cond_1",
-      "original_keyword": "여름 휴가 계획",
-      "importance": 0.9,
-      "expanded_queries": ["올해 여름 휴가를 떠날 예정이다", "해외 여행이나 국내 여행 계획이 있다", "휴가철 여행지를 알아보고 있다"],
-      "search_strategy": "category_specific"
+    { 
+      "original_keyword": "고양이를 안 키우는", 
+      "is_negative": true, 
+      "importance": 0.9, 
+      "expanded_queries": ["고양이를 키운다", "반려묘가 있다", "고양이 집사다"],
+      "note": "Filter out people similar to expanded_queries"
     }
   ],
-  "logic_structure": {"operator": "LEAF", "condition_id": "cond_1"},
-  "search_strategy_recommendation": {"strategy": "semantic_first"},
-  "limit": 50
+  "limit": 100
 }
 
----
-
-## 📤 출력 형식 (JSON Only)
-```json
+## 📤 Output Format (JSON Only)
+Return ONLY the raw JSON.
 {
   "demographic_filters": { ... },
   "semantic_conditions": [ ... ],
-  "logic_structure": { ... },
-  "exclude_conditions": [],
-  "search_strategy_recommendation": { ... },
   "limit": <number>
 }
 
-*** 실제 분석 대상 *** 
-사용자 쿼리: 
+*** Target Query ***
 <query>
 {{QUERY}}
 </query> 

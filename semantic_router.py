@@ -3,7 +3,6 @@ import numpy as np
 import os
 from typing import List, Dict
 from sklearn.metrics.pairwise import cosine_similarity
-# [수정] WELCOME_OBJECTIVE_FIELDS 추가 import
 from utils import QPOLL_FIELDS, WELCOME_OBJECTIVE_FIELDS, FIELD_NAME_MAP
 from search_helpers import initialize_embeddings
 from mapping_rules import get_field_mapping
@@ -31,7 +30,7 @@ class SemanticRouter:
         self.fields = []
         self.descriptions = []
         
-        # [수정 핵심] Q-Poll 뿐만 아니라 Welcome 데이터(가전, 차량 등)도 검색 대상에 포함!
+        # Q-Poll 뿐만 아니라 Welcome 데이터(가전, 차량 등)도 검색 대상에 포함!
         all_target_fields = QPOLL_FIELDS + WELCOME_OBJECTIVE_FIELDS
         
         for field, desc in all_target_fields:
@@ -55,7 +54,7 @@ class SemanticRouter:
 
         # 1. 키워드 기반 우선 검색
         keyword_match = get_field_mapping(user_intent)
-        # [수정] 타입이 qpoll이든 filter든 매칭되면 반환하도록 조건 완화
+        # 타입이 qpoll이든 filter든 매칭되면 반환하도록 조건 완화
         if keyword_match and keyword_match.get("field") != "unknown":
             logger.debug(f"  🎯 Semantic Route: '{user_intent}' -> '{keyword_match['description']}' (Keyword Match)")
             return {

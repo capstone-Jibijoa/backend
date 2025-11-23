@@ -2,6 +2,7 @@ import boto3
 import os
 import json
 from typing import Optional
+from functools import lru_cache
 
 # -- 1. Constants (AWS 설정 및 Secret Name) ---
 AWS_REGION = os.environ.get("DEFAULT_REGION", "ap-southeast-2")
@@ -23,7 +24,7 @@ def get_secrets_client():
             raise e
     return secrets_client
 
-
+@lru_cache(maxsize=1)
 def get_secrets_from_manager() -> dict:
     """Secrets Manager에서 JSON 형태의 비밀 값을 가져와 딕셔너리로 반환"""
     client = get_secrets_client()

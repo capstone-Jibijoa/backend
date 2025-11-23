@@ -12,6 +12,9 @@ load_dotenv()
 _connection_pool = None
 _pool_lock = Lock()
 
+_qdrant_client = None
+_qdrant_lock = Lock()
+
 def get_connection_pool():
     """
     싱글톤 패턴으로 PostgreSQL Connection Pool을 생성하고 반환합니다.
@@ -95,17 +98,29 @@ def close_connection_pool():
 
 
 def get_qdrant_client():
-    """Qdrant 클라이언트를 생성하고 반환합니다."""
-    try:
-        client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6333)),
-            timeout=20.0
-        )
-        return client
-    except Exception as e:
-        logging.error(f"Qdrant 클라이언트 연결 실패: {e}")
-        return None
+    """
+    Qdrant Client를 싱글톤으로 반환합니다.
+    """
+    global _qdrant_client
+    
+    if _qdrant_client is None:
+        with _qdrant_lock:
+            if _qdrant_client is None:
+                try:
+                    host = os.getenv("QDRANT_HOST", "localhost")
+                    port = int(os.getenv("QDRANT_PORT", 6333))
+                    
+                    _qdrant_client = QdrantClient(
+                        host=host, 
+                        port=port, 
+                        timeout=60 
+                    )
+                    logging.info(f"Qdrant Client 초기화 완료 ({host}:{port})")
+                except Exception as e:
+                    logging.error(f"Qdrant Client 생성 실패: {e}")
+                    _qdrant_client = None
+                    
+    return _qdrant_client
 
 
 def log_search_query(query: str, results_count: int, user_uid: int = None):
