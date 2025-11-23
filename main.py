@@ -170,7 +170,7 @@ def _prepare_display_fields(classification: Dict, chart_fields: Optional[List[st
 async def _perform_common_search(query_text: str, search_mode: str, mode: str) -> Tuple[Dict, List[str], Dict]:
     logging.info(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
     classification = parse_query_intelligent(query_text)
-    user_limit = classification.get('limit')
+    user_limit = classification.get('limit', 100)
     
     search_results = await asyncio.to_thread(hybrid_search, query=query_text, limit=user_limit)
     
