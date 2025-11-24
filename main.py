@@ -197,7 +197,6 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     }
     return pro_mode_info, panel_id_list, classification
 
-# [수정] 엄격한 필터링 제거됨! (데이터가 있으면 무조건 가져옴)
 async def _get_ordered_welcome_data(ids_to_fetch: List[str], fields_to_fetch: List[str] = None) -> List[dict]:
     if not ids_to_fetch: return []
     table_data = []
@@ -217,7 +216,6 @@ async def _get_ordered_welcome_data(ids_to_fetch: List[str], fields_to_fetch: Li
                     if not structured_data_val: continue
 
                     display_data = {'panel_id': panel_id_val}
-                    # 여기서는 필터링(is_valid_row = False)을 하지 않고, 있는 그대로 담습니다.
                     if fields_to_fetch:
                         for field in fields_to_fetch:
                             if field != 'panel_id':
@@ -261,10 +259,10 @@ async def _get_qpoll_responses_for_table(ids_to_fetch: List[str], qpoll_fields: 
 async def search_panels(search_query: SearchQuery):
     logging.info(f"🚀 [Lite 모드] 빠른 검색 시작: {search_query.query}")
     try:
-        lite_response, _, _ = await _perform_common_search(search_query.query, search_query.search_mode, mode="lite")
-        ids_to_fetch = lite_response.get('final_panel_ids', [])
+        lite_response, full_panel_ids, classification = await _perform_common_search(search_query.query, search_query.search_mode, mode="lite")
         
-        display_fields = _prepare_display_fields(lite_response['classification'])
+        ids_to_fetch = lite_response.get('final_panel_ids', [])
+        display_fields = _prepare_display_fields(classification)
         welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
         qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
         
@@ -281,20 +279,14 @@ async def search_panels(search_query: SearchQuery):
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
             
-            # [수정] 필터링 로직: Target Field만 체크
             is_valid_row = True
-            
-            # 1. Q-Poll 타겟인 경우
             if target_field in qpoll_fields:
                 val = welcome_row.get(target_field)
                 if not val or str(val).strip().lower() == 'nan': is_valid_row = False
-            
-            # 2. Welcome 타겟인 경우 (예: drinking_experience) - DB 필터로 이미 걸러졌겠지만 한번 더 체크
             elif target_field in welcome_fields:
                 val = welcome_row.get(target_field)
                 if not val or str(val).strip().lower() == 'nan': is_valid_row = False
 
-            # 나머지 필드 빈 값 처리
             for field in (welcome_fields + qpoll_fields):
                 if field != target_field:
                     val = welcome_row.get(field)
@@ -302,11 +294,17 @@ async def search_panels(search_query: SearchQuery):
 
             if is_valid_row:
                 table_data.append(welcome_row)
-            
-        final_limit = user_limit
-        lite_response['tableData'] = table_data[:final_limit]
+                
+        user_limit = classification.get('limit', 100)
+        
+        # table_data 슬라이싱에 user_limit 사용
+        final_limit = user_limit 
+        lite_response['tableData'] = table_data[:final_limit] 
+        
         lite_response['display_fields'] = display_fields
         lite_response['mode'] = "lite" 
+        lite_response['search_summary'] = None
+
         if 'final_panel_ids' in lite_response: del lite_response['final_panel_ids']
         return lite_response
     except Exception as e:
@@ -343,7 +341,7 @@ async def search_and_analyze(request: AnalysisRequest):
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
             
-            # [수정] 필터링 로직: Target Field만 체크
+            # 필터링 로직: Target Field만 체크
             is_valid_row = True
             if target_field in qpoll_fields:
                 val = welcome_row.get(target_field)
@@ -374,7 +372,6 @@ async def search_and_analyze(request: AnalysisRequest):
         logging.error(f"[Pro 모드] 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ... (debug endpoint 및 get_panel_details, read_root, health_check 등은 동일하게 유지) ...
 @app.post("/api/debug/classify")
 async def debug_classify(search_query: SearchQuery):
     try:
