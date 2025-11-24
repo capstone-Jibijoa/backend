@@ -18,13 +18,12 @@ from utils import (
     get_panels_data_from_db,
     get_age_group
 )
-# [필수] KEYWORD_MAPPINGS 추가 Import 확인
 from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES, KEYWORD_MAPPINGS
 from db import get_db_connection_context, get_qdrant_client
 from semantic_router import router 
 
 
-def _clean_label(text: Any, max_length: int = 10) -> str:
+def _clean_label(text: Any, max_length: int = 25) -> str:
     """라벨 정제 함수"""
     if not text: return ""
     text_str = str(text)
@@ -171,6 +170,8 @@ def create_chart_data_optimized(
     max_categories: int = 50
 ) -> Dict:
     """차트 데이터 생성 (SQL 집계 우선)"""
+    
+    # 1. DB 전체 집계가 필요한 경우 (나이, 자녀 수 등)
     if use_full_db or field_name == "children_count":
         logging.info(f"       → DB 집계로 '{field_name}' 분석")
         distribution = get_field_distribution_from_db(field_name, max_categories)
@@ -179,7 +180,8 @@ def create_chart_data_optimized(
         cleaned_distribution = defaultdict(float)
         for k, v in distribution.items(): cleaned_distribution[_clean_label(k)] += v
         
-        final_distribution = _sort_distribution(dict(cleaned_distribution))
+        # [수정] DB 집계 결과도 너무 많으면 줄임 (limit=8)
+        final_distribution = _limit_distribution_top_k(dict(cleaned_distribution), k=8)
         top_category, top_ratio = find_top_category(final_distribution)
         
         return {
@@ -189,9 +191,12 @@ def create_chart_data_optimized(
             "chart_data": [{"label": korean_name, "values": final_distribution}],
             "field": field_name 
         }
+
+    # 2. 검색 결과 내 집계 (리스트형 필드 등)
     else:
         values = []
         raw_values = [item.get(field_name) for item in panels_data if item.get(field_name)]
+        
         for val in raw_values:
             if isinstance(val, list):
                 for v in val:
@@ -204,7 +209,10 @@ def create_chart_data_optimized(
         if not values: return {"topic": korean_name, "description": "데이터 부족", "ratio": "0.0%", "chart_data": [], "field": field_name}
         
         distribution = calculate_distribution(values)
-        final_distribution = _sort_distribution(distribution)
+        
+        # 항목 개수를 제한하여 차트 간소화
+        final_distribution = _limit_distribution_top_k(distribution, k=10)
+        
         top_category, top_ratio = find_top_category(final_distribution)
         
         return {
@@ -425,11 +433,28 @@ def analyze_search_results_optimized(
         ranked_keywords = []
         search_used_fields = set()
 
+        charts = []
+        used_fields = [] 
+        chart_tasks = []
+        objective_fields = set([f[0] for f in WELCOME_OBJECTIVE_FIELDS])
+
         demographic_filters = classified_keywords.get('demographic_filters', {})
         if demographic_filters:
             if 'age_range' in demographic_filters: search_used_fields.add('birth_year')
             for key in demographic_filters: 
                 if key != 'age_range': search_used_fields.add(key)
+
+        if 'region_major' in demographic_filters and 'region_minor' not in used_fields:
+            logging.info("📍 지역 필터 감지 -> 세부 지역(region_minor) 분석 자동 추가")
+            chart_tasks.append({
+                "type": "filter",
+                "kw_info": {
+                    "field": "region_minor",
+                    "description": "세부 지역 분포", 
+                    "priority": 0 
+                }
+            })
+            used_fields.append("region_minor")
 
         structured_filters = classified_keywords.get('structured_filters', [])
         for f in structured_filters:
@@ -444,15 +469,7 @@ def analyze_search_results_optimized(
                 })
                 if mapping.get("type") == 'filter' and mapping["field"] != 'unknown':
                     search_used_fields.add(mapping["field"])
-        
-        charts = []
-        used_fields = []
-        objective_fields = set([f[0] for f in WELCOME_OBJECTIVE_FIELDS])
-        chart_tasks = []
 
-        # ======================================================================
-        # [핵심 수정] KEYWORD_MAPPINGS를 이용한 쿼리 직접 스캔 및 0순위 반영
-        # ======================================================================
         analysis_notes = classified_keywords.get('analysis_notes', {})
         dist_field = analysis_notes.get('distribution_field')
         
@@ -480,7 +497,6 @@ def analyze_search_results_optimized(
             else:
                 chart_tasks.append({"type": "filter", "kw_info": kw_info})
             used_fields.append(dist_field)
-        # ======================================================================
 
         # 1. Main Target Field (0순위)
         target_field = classified_keywords.get('target_field')

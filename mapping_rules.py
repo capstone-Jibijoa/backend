@@ -92,6 +92,7 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     (re.compile(r'미혼|싱글'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
     (re.compile(r'기혼|결혼'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
     (re.compile(r'이혼|돌싱'), {"field": "marital_status", "description": "결혼 여부", "type": "filter"}),
+    (re.compile(r'신혼\s*부부|신혼'), {"field": "birth_year", "description": "연령대 (신혼)", "type": "filter", "value_override": "20대, 30대"}),
     
     (re.compile(r'(\d+인|가족\s*\d+명|\d+인\s*가구)'), {"field": "family_size", "description": "가족 수", "type": "filter"}),
     
@@ -382,7 +383,7 @@ QPOLL_ANSWER_TEMPLATES = {
     "favorite_summer_water_spot": "여름철 물놀이 장소로 가장 선호하는 곳은 {answer_str}이다.",
 }
 
-# [추가] 질문 필드별 '부정/제외' 의미를 가진 키워드 정의
+# 질문 필드별 '부정/제외' 의미를 가진 키워드 정의
 NEGATIVE_ANSWER_KEYWORDS = {
     "moving_stress_factor": ["스트레스 받지 않는다", "없다", "딱히 없다", "신경 안 쓴다", "모르겠다", "상관 없다"],
     "ott_count": ["이용 안 함", "없음", "0개", "보지 않음"],

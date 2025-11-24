@@ -1,6 +1,3 @@
-import os
-import json
-import time
 import logging
 import re
 from fastapi import FastAPI, HTTPException
@@ -18,7 +15,6 @@ from llm import parse_query_intelligent
 from search_helpers import initialize_embeddings
 from search import hybrid_search as hybrid_search
 import asyncio
-# [수정] 필요한 매핑 룰 추가 import
 from mapping_rules import QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES, VECTOR_CATEGORY_TO_FIELD
 from insights import (
     analyze_search_results_optimized as analyze_search_results,
@@ -42,6 +38,7 @@ app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://main.dl33xtoyrvsye.amplifyapp.com"
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -51,7 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- [Helper 1] 텍스트 자르기 ---
+# --- Helper Functions ---
 def truncate_text(value: Any, max_length: int = 30) -> str:
     if value is None: return ""
     if isinstance(value, list):
@@ -62,14 +59,8 @@ def truncate_text(value: Any, max_length: int = 30) -> str:
         return text[:max_length] + "..."
     return text
 
-# --- [Helper 2] 템플릿 기반 핵심 답변 추출 (테이블용) ---
 def extract_answer_from_template(field_name: str, sentence: str) -> str:
-    """
-    QPOLL_ANSWER_TEMPLATES를 역이용하여 문장에서 핵심 답변(answer_str)만 추출합니다.
-    """
     if not sentence: return ""
-    
-    # 1. 특수 필드 처리
     if field_name == "ott_count":
         match = re.search(r'(\d+개|이용 안 함|없음)', sentence)
         if match: return match.group(1)
@@ -77,15 +68,11 @@ def extract_answer_from_template(field_name: str, sentence: str) -> str:
         match = re.search(r'(\d+만\s*원|\d+~\d+만\s*원|\d+원)', sentence)
         if match: return match.group(1)
 
-    # 2. 템플릿 기반 동적 추출
     template = QPOLL_ANSWER_TEMPLATES.get(field_name)
     if template:
         try:
-            # 템플릿을 정규식 패턴으로 변환
             pattern_str = re.escape(template)
             pattern_str = pattern_str.replace(re.escape("{answer_str}"), r"(.*?)")
-            
-            # 한국어 조사 유연성 처리
             pattern_str = pattern_str.replace(r"\(이\)다", r"(?:이)?다")
             pattern_str = pattern_str.replace(r"\(으\)로", r"(?:으)?로")
             pattern_str = pattern_str.replace(r"\(가\)", r"(?:가)?")
@@ -94,40 +81,19 @@ def extract_answer_from_template(field_name: str, sentence: str) -> str:
             match = re.search(pattern_str, sentence)
             if match:
                 extracted = match.group(1)
-                # 괄호 등 잔여물 제거
                 cleaned = re.sub(r'\([^)]*\)', '', extracted).strip()
-                return truncate_text(cleaned, 20) # 테이블용이므로 짧게
-        except:
-            pass
+                return truncate_text(cleaned, 20)
+        except: pass
 
-    # 3. 실패 시 기본 truncate
-    # 괄호 제거 후 반환
     cleaned = re.sub(r'\([^)]*\)', '', str(sentence)).strip()
     return truncate_text(cleaned, 30)
 
 # --- Caching Setup ---
-def custom_key_builder(
-    func: Callable[..., Awaitable[Any]],
-    namespace: str = "",
-    *, 
-    request: Request = None,
-    response: Response = None,
-    **kwargs: Any,
-) -> str:
+def custom_key_builder(func, namespace: str = "", *, request: Request = None, response: Response = None, **kwargs):
     if request:
         sorted_query_params = sorted(request.query_params.items())
-        return ":".join([
-            namespace,
-            request.method.lower(),
-            request.url.path,
-            repr(sorted_query_params),
-            func.__module__ + func.__name__,
-        ])
-    return ":".join([
-        namespace,
-        func.__module__ + func.__name__,
-        repr(sorted(kwargs.items()))
-    ])
+        return ":".join([namespace, request.method.lower(), request.url.path, repr(sorted_query_params), func.__module__ + func.__name__])
+    return ":".join([namespace, func.__module__ + func.__name__, repr(sorted(kwargs.items()))])
 
 # --- Model Preloading ---
 def preload_models():
@@ -137,8 +103,7 @@ def preload_models():
     logging.info("🔄 모든 AI 모델을 미리 로드합니다...")
     start = time.time()
     initialize_embeddings()
-    try:
-        router.find_closest_field("테스트 쿼리")
+    try: router.find_closest_field("테스트 쿼리")
     except: pass
     logging.info(f"✅ 모델 로드 완료 ({time.time() - start:.2f}초)")
 
@@ -154,7 +119,6 @@ async def shutdown_event():
     logging.info("🧹 FastAPI 종료... Connection Pool 정리")
     cleanup_db()
 
-# --- Pydantic Models ---
 class SearchQuery(BaseModel):
     query: str
     search_mode: str = "all"
@@ -163,101 +127,55 @@ class AnalysisRequest(BaseModel):
     query: str
     search_mode: str = "weighted"
 
-# --- [핵심 수정] 스마트 컬럼 선택 로직 ---
 def _prepare_display_fields(classification: Dict, chart_fields: Optional[List[str]] = None) -> List[Dict]:
-    """
-    VECTOR_CATEGORY_TO_FIELD를 참조하여 연관성 높은 컬럼들을 자동으로 선택합니다.
-    """
-    
-    # 1. 기본적으로 보여줄 필드 (어떤 검색이든 무조건 포함)
-    # DEMO_BASIC에 있는 것들을 기본으로 함
     relevant_categories = {"DEMO_BASIC"}
-    
-    # 2. 타겟 필드 확인 -> 해당 카테고리 활성화
     target_field = classification.get('target_field')
+    
     if target_field and target_field != 'unknown':
         for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
             if target_field in fields:
                 relevant_categories.add(category)
-                break # 한 필드는 한 카테고리에만 속한다고 가정
+                break
 
-    # 3. 필터 조건 확인 -> 해당 카테고리 활성화
-    # 예: '자녀 수' 필터가 있으면 FAMILY_STATUS 카테고리 전체를 보여줌
     structured_filters = classification.get('structured_filters', {}) or classification.get('demographic_filters', {})
-    
     filter_keys = []
-    if isinstance(structured_filters, dict):
-        filter_keys = structured_filters.keys()
-    elif isinstance(structured_filters, list):
-        filter_keys = [f.get('field') for f in structured_filters if f.get('field')]
+    if isinstance(structured_filters, dict): filter_keys = structured_filters.keys()
+    elif isinstance(structured_filters, list): filter_keys = [f.get('field') for f in structured_filters if f.get('field')]
 
     for f_key in filter_keys:
-        # age, age_range 등은 DEMO_BASIC에 포함되므로 자동 커버됨
-        # 그 외 필드들에 대해 카테고리 매칭
         for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
-            if f_key in fields:
-                relevant_categories.add(category)
+            if f_key in fields: relevant_categories.add(category)
 
-    # 4. 카테고리 우선순위 정의 (보여줄 순서)
-    CATEGORY_ORDER = [
-        "DEMO_BASIC",      # 기본 인적사항 (가장 왼쪽)
-        "FAMILY_STATUS",   # 가족
-        "JOB_EDUCATION",   # 직업/학력
-        "INCOME_LEVEL",    # 소득
-        "TECH_OWNER",      # 기기
-        "CAR_OWNER",       # 차량
-        "DRINK_HABIT",     # 음주
-        "SMOKE_HABIT"      # 흡연
-    ]
-
+    CATEGORY_ORDER = ["DEMO_BASIC", "FAMILY_STATUS", "JOB_EDUCATION", "INCOME_LEVEL", "TECH_OWNER", "CAR_OWNER", "DRINK_HABIT", "SMOKE_HABIT"]
     unique_fields = {}
     priority_counter = 0
 
-    # [A] 타겟 필드 최우선 배치
     if target_field and target_field != 'unknown':
         label = FIELD_NAME_MAP.get(target_field, target_field)
-        if target_field in QPOLL_FIELD_TO_TEXT:
-            label = QPOLL_FIELD_TO_TEXT[target_field] # 질문 텍스트
-        
-        unique_fields[target_field] = {
-            'field': target_field,
-            'label': label,
-            'priority': priority_counter
-        }
+        if target_field in QPOLL_FIELD_TO_TEXT: label = QPOLL_FIELD_TO_TEXT[target_field]
+        unique_fields[target_field] = {'field': target_field, 'label': label, 'priority': priority_counter}
         priority_counter += 1
 
-    # [B] 활성화된 카테고리의 모든 필드 추가
     for cat in CATEGORY_ORDER:
         if cat in relevant_categories:
             cat_fields = VECTOR_CATEGORY_TO_FIELD.get(cat, [])
             for field in cat_fields:
                 if field not in unique_fields:
-                    unique_fields[field] = {
-                        'field': field,
-                        'label': FIELD_NAME_MAP.get(field, field),
-                        'priority': priority_counter
-                    }
+                    unique_fields[field] = {'field': field, 'label': FIELD_NAME_MAP.get(field, field), 'priority': priority_counter}
                     priority_counter += 1
-
-    # 5. 정렬 및 반환 (최대 8개 정도로 제한하여 가독성 확보)
-    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
     
-    # 너무 많으면 잘라냄 (중요도 순)
+    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
     return final_result[:8]
  
 async def _perform_common_search(query_text: str, search_mode: str, mode: str) -> Tuple[Dict, List[str], Dict]:
     logging.info(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
     classification = parse_query_intelligent(query_text)
-    user_limit = classification.get('limit')
+    user_limit = classification.get('limit', 100)
     
-    search_results = hybrid_search(
-        query=query_text,
-        limit=user_limit
-    )
+    search_results = await asyncio.to_thread(hybrid_search, query=query_text, limit=user_limit)
     
     panel_id_list = search_results.get('final_panel_ids', [])
     total_count = len(panel_id_list)
-    
     classification['target_field'] = search_results.get('target_field')
     
     if mode == "lite":
@@ -279,13 +197,9 @@ async def _perform_common_search(query_text: str, search_mode: str, mode: str) -
     }
     return pro_mode_info, panel_id_list, classification
 
-
-async def _get_ordered_welcome_data(
-    ids_to_fetch: List[str], 
-    fields_to_fetch: List[str] = None
-) -> List[dict]:
+# [수정] 엄격한 필터링 제거됨! (데이터가 있으면 무조건 가져옴)
+async def _get_ordered_welcome_data(ids_to_fetch: List[str], fields_to_fetch: List[str] = None) -> List[dict]:
     if not ids_to_fetch: return []
-
     table_data = []
     try:
         with get_db_connection_context() as conn:
@@ -300,154 +214,167 @@ async def _get_ordered_welcome_data(
                 if pid in fetched_data_map:
                     row_data = fetched_data_map[pid]
                     panel_id_val, structured_data_val = row_data
-                    display_data = {'panel_id': panel_id_val}
+                    if not structured_data_val: continue
 
+                    display_data = {'panel_id': panel_id_val}
+                    # 여기서는 필터링(is_valid_row = False)을 하지 않고, 있는 그대로 담습니다.
                     if fields_to_fetch:
-                        if isinstance(structured_data_val, dict):
-                            for field in fields_to_fetch:
-                                if field != 'panel_id':
-                                    # 일반 필드는 truncate_text 적용
-                                    val = structured_data_val.get(field)
-                                    display_data[field] = truncate_text(val) 
+                        for field in fields_to_fetch:
+                            if field != 'panel_id':
+                                val = structured_data_val.get(field)
+                                display_data[field] = truncate_text(val) 
                     else:
-                        if isinstance(structured_data_val, dict):
-                            for k, v in structured_data_val.items():
-                                if k != 'panel_id':
-                                    display_data[k] = truncate_text(v)
+                        for k, v in structured_data_val.items():
+                            if k != 'panel_id':
+                                display_data[k] = truncate_text(v)
                     table_data.append(display_data)
             cur.close()
     except Exception as db_e:
         logging.error(f"Table Data 조회 실패: {db_e}")
     return table_data
 
-async def _get_qpoll_responses_for_table(
-    ids_to_fetch: List[str], 
-    qpoll_fields: List[str]
-) -> Dict[str, Dict[str, str]]:
+async def _get_qpoll_responses_for_table(ids_to_fetch: List[str], qpoll_fields: List[str]) -> Dict[str, Dict[str, str]]:
     if not ids_to_fetch or not qpoll_fields: return {}
-    
     questions_to_fetch = [QPOLL_FIELD_TO_TEXT[f] for f in qpoll_fields if f in QPOLL_FIELD_TO_TEXT]
     if not questions_to_fetch: return {}
 
     def qdrant_call():
         qpoll_client = get_qdrant_client()
         if not qpoll_client: return {}
-        
-        query_filter = Filter(
-            must=[
-                FieldCondition(key="panel_id", match=MatchAny(any=ids_to_fetch)),
-                FieldCondition(key="question", match=MatchAny(any=questions_to_fetch))
-            ]
-        )
-        
-        qpoll_results, _ = qpoll_client.scroll(
-            collection_name="qpoll_vectors_v2",
-            scroll_filter=query_filter,
-            limit=len(ids_to_fetch) * len(questions_to_fetch),
-            with_payload=True, with_vectors=False
-        )
-
+        query_filter = Filter(must=[FieldCondition(key="panel_id", match=MatchAny(any=ids_to_fetch)), FieldCondition(key="question", match=MatchAny(any=questions_to_fetch))])
+        qpoll_results, _ = qpoll_client.scroll(collection_name="qpoll_vectors_v2", scroll_filter=query_filter, limit=len(ids_to_fetch) * len(questions_to_fetch), with_payload=True, with_vectors=False)
         result_map = {pid: {} for pid in ids_to_fetch}
         text_to_field_map = {v: k for k, v in QPOLL_FIELD_TO_TEXT.items()}
-        
         for point in qpoll_results:
             pid = point.payload.get("panel_id")
             question = point.payload.get("question")
             sentence = point.payload.get("sentence")
-
             if pid and question and sentence:
                 field_key = text_to_field_map.get(question)
                 if field_key:
-                    # [핵심 수정] 문장 전체가 아니라 템플릿 기반으로 추출한 '핵심 답변'만 테이블에 넣음
                     core_value = extract_answer_from_template(field_key, sentence)
                     result_map[pid][field_key] = core_value
-                    
         return result_map
-
     return await asyncio.get_running_loop().run_in_executor(None, qdrant_call)
 
 @app.post("/api/search")
 async def search_panels(search_query: SearchQuery):
     logging.info(f"🚀 [Lite 모드] 빠른 검색 시작: {search_query.query}")
     try:
-        lite_response, _, _ = await _perform_common_search(
-            search_query.query, search_query.search_mode, mode="lite"
-        )
+        lite_response, _, _ = await _perform_common_search(search_query.query, search_query.search_mode, mode="lite")
         ids_to_fetch = lite_response.get('final_panel_ids', [])
         
-        # Lite 모드에서도 스마트 컬럼 적용
         display_fields = _prepare_display_fields(lite_response['classification'])
-        
         welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
         qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
         
-        welcome_table_data = await _get_ordered_welcome_data(ids_to_fetch, welcome_fields)
-        qpoll_responses_map = await _get_qpoll_responses_for_table(ids_to_fetch, qpoll_fields)
+        welcome_table_data, qpoll_responses_map = await asyncio.gather(
+            _get_ordered_welcome_data(ids_to_fetch, welcome_fields),
+            _get_qpoll_responses_for_table(ids_to_fetch, qpoll_fields)
+        )
         
         table_data = []
+        target_field = lite_response.get('classification', {}).get('target_field')
+
         for welcome_row in welcome_table_data:
             pid = welcome_row.get('panel_id')
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
-            table_data.append(welcome_row)
             
-        lite_response['tableData'] = table_data
-        lite_response['display_fields'] = display_fields # 프론트엔드가 헤더를 알 수 있게 전달
+            # [수정] 필터링 로직: Target Field만 체크
+            is_valid_row = True
+            
+            # 1. Q-Poll 타겟인 경우
+            if target_field in qpoll_fields:
+                val = welcome_row.get(target_field)
+                if not val or str(val).strip().lower() == 'nan': is_valid_row = False
+            
+            # 2. Welcome 타겟인 경우 (예: drinking_experience) - DB 필터로 이미 걸러졌겠지만 한번 더 체크
+            elif target_field in welcome_fields:
+                val = welcome_row.get(target_field)
+                if not val or str(val).strip().lower() == 'nan': is_valid_row = False
+
+            # 나머지 필드 빈 값 처리
+            for field in (welcome_fields + qpoll_fields):
+                if field != target_field:
+                    val = welcome_row.get(field)
+                    if not val or str(val).strip().lower() == 'nan': welcome_row[field] = "-"
+
+            if is_valid_row:
+                table_data.append(welcome_row)
+            
+        final_limit = user_limit
+        lite_response['tableData'] = table_data[:final_limit]
+        lite_response['display_fields'] = display_fields
         lite_response['mode'] = "lite" 
-        del lite_response['final_panel_ids']
-        
+        if 'final_panel_ids' in lite_response: del lite_response['final_panel_ids']
         return lite_response
     except Exception as e:
         logging.error(f"[Lite 모드] 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/api/search-and-analyze")
 async def search_and_analyze(request: AnalysisRequest):
     logging.info(f"📊 [Pro 모드] 검색 + 분석 시작: {request.query}")
     try:
-        pro_info, panel_ids, classification = await _perform_common_search(
-            request.query, request.search_mode, mode="pro"
-        )
-        
-        # 차트 생성
-        analysis_result, status_code = await asyncio.to_thread(analyze_search_results,
-            request.query, classification, panel_ids[:5000]
-        )
-        charts = analysis_result.get('charts', [])
-        
-        # [스마트 컬럼] 차트 필드와 상관없이, 카테고리 기반으로 깔끔하게 선정
-        display_fields = _prepare_display_fields(classification)
+        pro_info, panel_ids, classification = await _perform_common_search(request.query, request.search_mode, mode="pro")
+        user_limit = classification.get('limit', 100)
 
-        # 테이블 데이터 조회
+        analysis_result, _ = await asyncio.to_thread(analyze_search_results, request.query, classification, panel_ids[:5000])
+        charts = analysis_result.get('charts', []) if analysis_result else []
+        
+        display_fields = _prepare_display_fields(classification)
         welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
         qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
 
-        welcome_table_data = await _get_ordered_welcome_data(panel_ids[:100], fields_to_fetch=welcome_fields)
-        qpoll_responses_map = await _get_qpoll_responses_for_table(panel_ids[:100], qpoll_fields)
+        fetch_limit = max(user_limit * 2, 500) 
+        ids_to_fetch = panel_ids[:fetch_limit]
+
+        welcome_table_data, qpoll_responses_map = await asyncio.gather(
+            _get_ordered_welcome_data(ids_to_fetch, fields_to_fetch=welcome_fields),
+            _get_qpoll_responses_for_table(ids_to_fetch, qpoll_fields)
+        )
 
         table_data = []
+        target_field = classification.get('target_field')
+        
         for welcome_row in welcome_table_data:
             pid = welcome_row.get('panel_id')
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
-            table_data.append(welcome_row)
+            
+            # [수정] 필터링 로직: Target Field만 체크
+            is_valid_row = True
+            if target_field in qpoll_fields:
+                val = welcome_row.get(target_field)
+                if not val or str(val).strip().lower() == 'nan': is_valid_row = False
+            elif target_field in welcome_fields:
+                val = welcome_row.get(target_field)
+                if not val or str(val).strip().lower() == 'nan': is_valid_row = False
+            
+            for field in (welcome_fields + qpoll_fields):
+                if field != target_field:
+                    val = welcome_row.get(field)
+                    if not val or str(val).strip().lower() == 'nan': welcome_row[field] = "-"
+
+            if is_valid_row:
+                table_data.append(welcome_row)
         
         response_data = {
             "query": pro_info["query"],
             "classification": classification,
             "display_fields": display_fields,
             "charts": charts,
-            "tableData": table_data,
-            "total_count": len(panel_ids),
+            "tableData": table_data[:user_limit], # 100개 제한
+            "total_count": len(panel_ids), 
             "mode": 'pro'
         }
         return response_data
-        
     except Exception as e:
         logging.error(f"[Pro 모드] 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ... (debug endpoint 및 get_panel_details, read_root, health_check 등은 동일하게 유지) ...
 @app.post("/api/debug/classify")
 async def debug_classify(search_query: SearchQuery):
     try:
@@ -455,7 +382,6 @@ async def debug_classify(search_query: SearchQuery):
         return {"query": search_query.query, "classification": classification}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 async def _get_welcome_data(panel_id: str) -> Dict:
     def db_call():
@@ -471,7 +397,6 @@ async def _get_welcome_data(panel_id: str) -> Dict:
             if isinstance(data, dict): p_data.update(data)
             return p_data
     return await asyncio.get_running_loop().run_in_executor(None, db_call)
-
 
 async def _get_qpoll_data(panel_id: str) -> Dict:
     q_data = {"qpoll_응답_개수": 0}
@@ -500,40 +425,21 @@ async def _get_qpoll_data(panel_id: str) -> Dict:
 
 @app.get("/api/panels/{panel_id}")
 async def get_panel_details(panel_id: str):
-    """
-    특정 panel_id의 패널 상세 정보를 병렬로 조회합니다.
-    """
     try:
         logging.info(f"⚡️ 패널 상세 정보 병렬 조회 시작 (panel_id: {panel_id})")
-        
-        results = await asyncio.gather(
-            _get_welcome_data(panel_id),
-            _get_qpoll_data(panel_id),
-            return_exceptions=True
-        )
-
-        # 결과 취합
+        results = await asyncio.gather(_get_welcome_data(panel_id), _get_qpoll_data(panel_id), return_exceptions=True)
         panel_data, qpoll_data = {}, {}
         for result in results:
-            if isinstance(result, HTTPException):
-                raise result # 404 Not Found 등은 즉시 반환
-            elif isinstance(result, Exception):
-                raise HTTPException(status_code=500, detail=f"조회 중 내부 오류 발생: {result}")
-            
-            if "qpoll_응답_개수" in result:
-                qpoll_data = result
-            else:
-                panel_data = result
-
+            if isinstance(result, HTTPException): raise result 
+            elif isinstance(result, Exception): raise HTTPException(status_code=500, detail=f"조회 중 내부 오류 발생: {result}")
+            if "qpoll_응답_개수" in result: qpoll_data = result
+            else: panel_data = result
         panel_data.update(qpoll_data)
         return panel_data
-        
-    except HTTPException:
-        raise
+    except HTTPException: raise
     except Exception as e:
         logging.error(f"패널 상세 조회 실패: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"조회 실패: {str(e)}")
-
 
 @app.get("/")
 def read_root():

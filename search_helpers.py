@@ -23,35 +23,50 @@ FIELD_ALIAS_MAP = {
     "region": "region_major"          
 }
 
-# [핵심 수정] 실제 데이터(명사형)를 포함하도록 매핑 키워드 확장
+# 실제 데이터(명사형)를 포함하도록 매핑 키워드 확장
 VALUE_TRANSLATION_MAP = {
     'gender': {
-        '남성': 'M', '여성': 'F', '남자': 'M', '여자': 'F',
+        '남성': 'M', '여성': 'F', '남자': 'M', '여자': 'F', 
+        'male': 'M', 'female': 'F' # 영어 추가
     },
     'marital_status': {
-        '미혼': '미혼', '싱글': '미혼', '기혼': '기혼', '결혼': '기혼', '이혼': '이혼', '돌싱': '이혼'
+        '미혼': '미혼', '싱글': '미혼', '기혼': '기혼', '결혼': '기혼', '이혼': '이혼', '돌싱': '이혼',
+        'single': '미혼', 'married': '기혼' # 영어 추가
     },
-    'car_ownership': {
-        '있음': '있다', 
-        '보유': '있다', 
-        '자차': '있다', 
-        '오너': '있다',
-        '없음': '없다', 
-        '미보유': '없다', 
-        '뚜벅이': '없다'
+    'education_level': {
+        '고졸': ['고등학교 졸업 이하', '고등학교 졸업', '고졸'],
+        '고등학교 졸업': ['고등학교 졸업 이하', '고등학교 졸업'],
+
+        '중졸 이하': ['고등학교 졸업 이하', '중학교 졸업 이하', '중학교 졸업', '초등학교 졸업 이하', '무학'],
+        '중학교 졸업': ['고등학교 졸업 이하', '중학교 졸업 이하', '중학교 졸업'],
+
+        '대졸': ['대학교 졸업', '대학원 재학 이상', '학사', '석사', '박사'],
+        '대학교 졸업': ['대학교 졸업', '대학원 재학 이상'],
+        '대학원': ['대학원 재학 이상'],
+
+        '저학력': ['고등학교 졸업 이하', '중학교 졸업 이하', '고등학교 졸업', '중학교 졸업', '초등학교 졸업 이하'],
+        '고학력': ['대학교 졸업', '대학원 재학 이상']
     },
     'smoking_experience': {
-        # [수정] 데이터가 "일반 담배", "전자담배" 형태이므로 해당 단어 포함
+        'have_smoked': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
+        'smoker': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
+        
         '있음': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'], 
         '흡연': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
-        # 부정 키워드는 확실한 것만
+        
+        'no': ['피워본 적이', '비흡연'],
+        'none': ['피워본 적이', '비흡연'],
+        'non_smoker': ['피워본 적이', '비흡연'],
         '없음': ['피워본 적이', '비흡연'],
         '비흡연': ['피워본 적이', '비흡연'],
     },
     'drinking_experience': {
-        # [수정] 음주 데이터도 '소주', '맥주' 형태이므로 종류 포함
-        '있음': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '마신다', '음주', '술'],
-        '없음': ['마시지', '비음주', '금주'],
+        'have_drink': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'], # 영어 추가
+        'drinker': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'],
+        '있음': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'],
+        
+        'no': ['최근 1년 이내 술을 마시지 않음', '마시지', '비음주', '금주', '않음'], # 영어 추가
+        '없음': ['최근 1년 이내 술을 마시지 않음', '마시지', '비음주', '금주', '않음'],
     }
 }
 
@@ -85,7 +100,19 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
 
         field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
-        # --- [특수 처리] 나이 계산 ---
+        if operator == "not_null":
+            # JSONB 필드 내에 해당 키가 존재하고, null이 아닌지 확인
+            base_condition = f"(structured_data->>'{field}' IS NOT NULL AND structured_data->>'{field}' != 'NaN')"
+            
+            # 2. '없음', '해당 없음', '비흡연' 등 무의미한 텍스트도 제외 (SQL 레벨)
+            # 정규식으로 '없음', '비흡연', '피우지 않음' 등이 포함된 경우 제외
+            exclude_pattern = "없음|비흡연|해당사항|피우지|금연"
+            refined_condition = f"({base_condition} AND structured_data->>'{field}' !~ '{exclude_pattern}')"
+            
+            conditions.append(refined_condition)
+            continue 
+
+        # --- 나이 계산 ---
         if field == "birth_year" or raw_field == "age":
             if operator == "between" and isinstance(value, list) and len(value) == 2:
                 age_start, age_end = value
@@ -95,7 +122,7 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 params.extend([birth_year_start, birth_year_end])
             continue
         
-        # --- [값 변환] 매핑된 값으로 변환 ---
+        # --- 매핑된 값으로 변환 ---
         final_value = value
         if field in VALUE_TRANSLATION_MAP:
             mapping = VALUE_TRANSLATION_MAP[field]
@@ -112,22 +139,41 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 mapped_v = mapping.get(value, value)
                 final_value = mapped_v
 
-        # --- [분기 1] JSON 배열(List) 필드 처리 ---
+        # --- JSON 배열(List) 필드 처리 ---
         # ILIKE를 사용하여 부분 문자열 검색 (배열 -> 문자열 변환 후 검색)
         if field in ARRAY_FIELDS:
             if not isinstance(final_value, list):
                 final_value = [final_value]
             
-            # "일반 담배" 데이터에서 "일반"만 있어도 찾을 수 있게 ILIKE 사용
             or_conditions = []
             for v in final_value:
                 or_conditions.append(f"structured_data->>'{field}' ILIKE %s")
                 params.append(f"%{v}%")
             
             if or_conditions:
-                conditions.append(f"({' OR '.join(or_conditions)})")
+                # 긍정 키워드('술')가 있더라도 부정어('않음')가 있으면 제외하는 로직
+                exclude_sql = ""
+                
+                # 1. 음주 경험 (drinking_experience)
+                if field == "drinking_experience":
+                    # '마시지', '않음', '없음', '비음주', '금주', '안 마심' 등이 포함되면 제외
+                    exclude_patterns = "마시지|않음|없음|비음주|금주|안\\s*마심|전혀"
+                    exclude_sql = f" AND structured_data->>'{field}' !~ '{exclude_patterns}'"
+                
+                # 2. 흡연 경험 (smoking_experience) - 혹시 모를 비흡연자 데이터 방지
+                elif field == "smoking_experience":
+                    exclude_patterns = "피우지|않음|없음|비흡연|금연|안\\s*피움"
+                    exclude_sql = f" AND structured_data->>'{field}' !~ '{exclude_patterns}'"
 
-        # --- [분기 2] 숫자형 필드 처리 ---
+                elif field == "ott_count":
+                    # '0개', '안 함', '없음', '이용 안' 등이 포함되면 제외
+                    exclude_pattern = "0개|안\\s*함|없음|이용\\s*안|보지\\s*않음"
+                    conditions.append(f"({base_condition} AND structured_data->>'{field}' !~ '{exclude_pattern}')")
+
+                # 기존 OR 조건 뒤에 AND 제외 조건 붙이기
+                conditions.append(f"({' OR '.join(or_conditions)}){exclude_sql}")
+
+        # --- 숫자형 필드 처리 ---
         elif field in ["children_count"]:
             field_sql = f"(structured_data->>'{field}')::numeric"
             if operator == "between" and isinstance(final_value, list) and len(final_value) == 2:
@@ -143,20 +189,22 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 conditions.append(f"{field_sql} = %s")
                 params.append(final_value)
 
-        # --- [분기 3] 일반 문자열 필드 처리 ---
+        # --- 일반 문자열 필드 처리 ---
         else:
             field_sql = f"structured_data->>'{field}'"
 
             if field == "family_size":
+                # 리스트인 경우 (예: 2인 가구 OR 3인 가구)
                 if isinstance(final_value, list):
                     or_conditions = []
                     for v in final_value:
-                        or_conditions.append(f"{field_sql} ILIKE %s")
-                        params.append(f"%{v}%")
+                        or_conditions.append(f"{field_sql} ~ %s")
+                        params.append(f"^{v}([^0-9]|$)") 
                     conditions.append(f"({' OR '.join(or_conditions)})")
+                # 단일 값인 경우
                 else:
-                    conditions.append(f"{field_sql} ILIKE %s")
-                    params.append(f"%{final_value}%")
+                    conditions.append(f"{field_sql} ~ %s")
+                    params.append(f"^{final_value}([^0-9]|$)")
 
             elif operator == "eq":
                 if field in ["job_title_raw", "job_duty_raw"]:
@@ -220,7 +268,6 @@ def search_welcome_objective(
         logging.error(f"   Welcome {attempt_name} 검색 실패: {e}", exc_info=True)
         return set(), set()
 
-# ... (이하 search_preference_conditions, filter_negative_conditions, initialize_embeddings 등 기존 코드 유지) ...
 def search_preference_conditions(
     preference_keywords: List[str],
     query_vectors: List[List[float]],

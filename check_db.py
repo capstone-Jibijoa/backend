@@ -167,7 +167,6 @@ def check_database_structure():
         
         cur.close()
         
-        # 7. 코드 수정 가이드
         print("\n" + "="*70)
         print("📝 코드 수정 완료 상태")
         print("="*70)

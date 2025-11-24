@@ -1,4 +1,3 @@
-import os
 import psycopg2
 import psycopg2.pool
 import logging
@@ -6,11 +5,15 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from threading import Lock
 from contextlib import contextmanager
+from settings import settings
 
 load_dotenv()
 
 _connection_pool = None
 _pool_lock = Lock()
+
+_qdrant_client = None
+_qdrant_lock = Lock()
 
 def get_connection_pool():
     """
@@ -25,10 +28,10 @@ def get_connection_pool():
                     _connection_pool = psycopg2.pool.ThreadedConnectionPool(
                         minconn=5,
                         maxconn=20,
-                        host=os.getenv("DB_HOST", "localhost"),
-                        database=os.getenv("DB_NAME", "default_db"),
-                        user=os.getenv("DB_USER", "postgres"),
-                        password=os.getenv("DB_PASSWORD"),
+                        host=settings.DB_HOST,
+                        database=settings.DB_NAME,
+                        user=settings.DB_USER,
+                        password=settings.DB_PASSWORD,
                         connect_timeout=5,
                         options="-c statement_timeout=30000"
                     )
@@ -95,17 +98,29 @@ def close_connection_pool():
 
 
 def get_qdrant_client():
-    """Qdrant 클라이언트를 생성하고 반환합니다."""
-    try:
-        client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6333)),
-            timeout=20.0
-        )
-        return client
-    except Exception as e:
-        logging.error(f"Qdrant 클라이언트 연결 실패: {e}")
-        return None
+    """
+    Qdrant Client를 싱글톤으로 반환합니다.
+    """
+    global _qdrant_client
+    
+    if _qdrant_client is None:
+        with _qdrant_lock:
+            if _qdrant_client is None:
+                try:
+                    host = settings.QDRANT_HOST
+                    port = settings.QDRANT_PORT
+                    
+                    _qdrant_client = QdrantClient(
+                        host=host, 
+                        port=port, 
+                        timeout=60 
+                    )
+                    logging.info(f"Qdrant Client 초기화 완료 ({host}:{port})")
+                except Exception as e:
+                    logging.error(f"Qdrant Client 생성 실패: {e}")
+                    _qdrant_client = None
+                    
+    return _qdrant_client
 
 
 def log_search_query(query: str, results_count: int, user_uid: int = None):
