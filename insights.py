@@ -18,10 +18,15 @@ from utils import (
     get_panels_data_from_db,
     get_age_group
 )
-from mapping_rules import get_field_mapping, QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES, KEYWORD_MAPPINGS
+from mapping_rules import (
+    get_field_mapping, 
+    QPOLL_FIELD_TO_TEXT, 
+    QPOLL_ANSWER_TEMPLATES, 
+    KEYWORD_MAPPINGS,
+    VALUE_TRANSLATION_MAP  
+)
 from db import get_db_connection_context, get_qdrant_client
 from semantic_router import router 
-
 
 def _clean_label(text: Any, max_length: int = 25) -> str:
     """라벨 정제 함수"""
@@ -60,7 +65,7 @@ def _extract_core_value(field_name: str, sentence: str) -> str:
 
     return _clean_label(sentence)
 
-def _limit_distribution_top_k(distribution: Dict[str, float], k: int = 7) -> Dict[str, float]:
+def _limit_distribution_top_k(distribution: Dict[str, float], k: int = 10) -> Dict[str, float]:
     """[막대 차트용] 상위 K개만 남기고 나머지는 '기타'로 합칩니다."""
     if not distribution or len(distribution) <= k:
         return distribution
@@ -180,7 +185,6 @@ def create_chart_data_optimized(
         cleaned_distribution = defaultdict(float)
         for k, v in distribution.items(): cleaned_distribution[_clean_label(k)] += v
         
-        # [수정] DB 집계 결과도 너무 많으면 줄임 (limit=8)
         final_distribution = _limit_distribution_top_k(dict(cleaned_distribution), k=8)
         top_category, top_ratio = find_top_category(final_distribution)
         
@@ -195,24 +199,24 @@ def create_chart_data_optimized(
     # 2. 검색 결과 내 집계 (리스트형 필드 등)
     else:
         values = []
-        raw_values = [item.get(field_name) for item in panels_data if item.get(field_name)]
         
-        for val in raw_values:
-            if isinstance(val, list):
-                for v in val:
-                    cleaned = _clean_label(v)
+        if field_name == 'birth_year':
+            values = [get_age_group(item.get(field_name)) for item in panels_data if item.get(field_name)]
+        else:
+            raw_values = [item.get(field_name) for item in panels_data if item.get(field_name)]
+            for val in raw_values:
+                if isinstance(val, list):
+                    for v in val:
+                        cleaned = _clean_label(v)
+                        if cleaned: values.append(cleaned)
+                elif val is not None:
+                    cleaned = _clean_label(val)
                     if cleaned: values.append(cleaned)
-            elif val is not None:
-                cleaned = _clean_label(val)
-                if cleaned: values.append(cleaned)
         
         if not values: return {"topic": korean_name, "description": "데이터 부족", "ratio": "0.0%", "chart_data": [], "field": field_name}
         
         distribution = calculate_distribution(values)
-        
-        # 항목 개수를 제한하여 차트 간소화
-        final_distribution = _limit_distribution_top_k(distribution, k=10)
-        
+        final_distribution = _limit_distribution_top_k(distribution, k=12)
         top_category, top_ratio = find_top_category(final_distribution)
         
         return {
@@ -307,7 +311,7 @@ def create_crosstab_chart(
     if not crosstab_data:
         return {}
 
-    # [Case 1] 단일 그룹 -> Pie Chart (전체 표시)
+    # [Case 1] 단일 그룹 -> Pie Chart
     if len(crosstab_data) <= 1:
         only_group = list(crosstab_data.keys())[0]
         distribution = calculate_distribution(crosstab_data[only_group])
@@ -321,7 +325,7 @@ def create_crosstab_chart(
             "fields": [field1, field2]
         }
 
-    # [Case 2] 다중 그룹 -> Bar Chart (Top 7)
+    # [Case 2] 다중 그룹 -> Bar Chart
     chart_values = {}
     sorted_groups = sorted(crosstab_data.keys(), key=lambda k: len(crosstab_data[k]), reverse=True)
     target_groups = sorted_groups[:max_categories]
@@ -412,9 +416,6 @@ def find_high_ratio_fields_optimized(
     high_ratio_results.sort(key=lambda x: x["top_ratio"], reverse=True)
     return high_ratio_results[:max_charts]
 
-def _generate_no_results_tips(classified_keywords: dict) -> str:
-    return "검색 결과가 없습니다. 조건을 완화해 보세요."
-
 def analyze_search_results_optimized(
     query: str,
     classified_keywords: dict,
@@ -423,7 +424,7 @@ def analyze_search_results_optimized(
     logging.info(f"📊 분석 시작 (최적화) - panel_id 수: {len(panel_id_list)}개")
     
     if not panel_id_list:
-        return {"main_summary": _generate_no_results_tips(classified_keywords), "charts": []}, 200
+        return {"main_summary": "검색 결과가 없습니다.", "charts": []}, 200
     
     try:
         panels_data = get_panels_data_from_db(panel_id_list)
@@ -443,6 +444,10 @@ def analyze_search_results_optimized(
             if 'age_range' in demographic_filters: search_used_fields.add('birth_year')
             for key in demographic_filters: 
                 if key != 'age_range': search_used_fields.add(key)
+
+        # 자녀 유무 필터가 있으면 '결혼 여부'는 분석에서 제외
+        if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
+            used_fields.append('marital_status')
 
         if 'region_major' in demographic_filters and 'region_minor' not in used_fields:
             logging.info("📍 지역 필터 감지 -> 세부 지역(region_minor) 분석 자동 추가")
@@ -470,34 +475,6 @@ def analyze_search_results_optimized(
                 if mapping.get("type") == 'filter' and mapping["field"] != 'unknown':
                     search_used_fields.add(mapping["field"])
 
-        analysis_notes = classified_keywords.get('analysis_notes', {})
-        dist_field = analysis_notes.get('distribution_field')
-        
-        # 1. LLM이 놓쳤을 경우를 대비해 Regex로 직접 스캔
-        if not dist_field or dist_field == 'unknown':
-            for pattern, mapping_info in KEYWORD_MAPPINGS:
-                if isinstance(pattern, re.Pattern):
-                    if pattern.search(query):
-                        if "분포" in query or "비율" in query or "수" in query:
-                            if mapping_info['field'] in ["children_count", "family_size"]:
-                                dist_field = mapping_info['field']
-                                break
-        
-        # 2. 찾아낸 dist_field가 있으면 0순위로 추가
-        if dist_field and dist_field != 'unknown' and dist_field not in used_fields:
-            logging.info(f"   ✨ [분석 필드 감지] 분포 분석 대상: {dist_field}")
-            kw_info = {
-                "field": dist_field, 
-                "description": FIELD_NAME_MAP.get(dist_field, dist_field), 
-                "priority": -1 # 최우선 순위
-            }
-            
-            if dist_field in QPOLL_FIELD_TO_TEXT:
-                chart_tasks.append({"type": "qpoll", "kw_info": kw_info})
-            else:
-                chart_tasks.append({"type": "filter", "kw_info": kw_info})
-            used_fields.append(dist_field)
-
         # 1. Main Target Field (0순위)
         target_field = classified_keywords.get('target_field')
         if target_field and target_field != 'unknown' and target_field not in used_fields:
@@ -507,6 +484,17 @@ def analyze_search_results_optimized(
             elif target_field in objective_fields:
                 chart_tasks.append({"type": "filter", "kw_info": {"field": target_field, "description": FIELD_NAME_MAP.get(target_field, target_field), "priority": 0}})
                 used_fields.append(target_field)
+
+        # Q-Poll 타겟인 경우 기본 인구통계(성별, 연령, 지역) 자동 추가
+        if target_field and target_field in QPOLL_FIELD_TO_TEXT:
+            basic_demos = [('gender', '성별'), ('birth_year', '연령대'), ('region_major', '거주 지역')]
+            for field, label in basic_demos:
+                if field not in used_fields and field not in search_used_fields:
+                    chart_tasks.append({
+                        "type": "filter",
+                        "kw_info": {"field": field, "description": label, "priority": 1}
+                    })
+                    used_fields.append(field)
 
         # 2. Semantic Conditions (1순위)
         semantic_conditions = classified_keywords.get('semantic_conditions', [])
@@ -554,6 +542,42 @@ def analyze_search_results_optimized(
                     val = f.get('value')
                     if (isinstance(val, list) and any(str(v).startswith('1') for v in val) or str(val).startswith('1')): is_single_household = True
         if is_single_household: used_fields.append('income_household_monthly')
+
+        # 차량 소유 비율 70% 이상 시 '소유 여부' 대신 '차종' 차트 노출 (정규화 적용)
+        car_ownership_values = [p.get('car_ownership') for p in panels_data if p.get('car_ownership')]
+        if car_ownership_values:
+            flat_values = []
+            car_map = VALUE_TRANSLATION_MAP.get('car_ownership', {}) # 매핑 정보 로드
+            
+            for v in car_ownership_values:
+                if isinstance(v, list):
+                    for sub_v in v:
+                        cleaned = _clean_label(sub_v)
+                        normalized = car_map.get(cleaned, cleaned) # 값 정규화
+                        flat_values.append(normalized)
+                else:
+                    cleaned = _clean_label(v)
+                    normalized = car_map.get(cleaned, cleaned) # 값 정규화
+                    flat_values.append(normalized)
+            
+            car_dist = calculate_distribution(flat_values)
+            # '있음' 비율 70% 이상이면
+            if car_dist.get('있음', 0) >= 70.0:
+                if 'car_model_raw' not in used_fields:
+                    logging.info("🚗 차량 보유 비율 70% 이상 -> 차종(car_model_raw) 분석 자동 추가 (소유 여부 차트 대체)")
+                    chart_tasks.append({
+                        "type": "filter",
+                        "kw_info": {
+                            "field": "car_model_raw",
+                            "description": "보유 차량 모델",
+                            "priority": 1 
+                        }
+                    })
+                    used_fields.append("car_model_raw")
+                
+                # 차량 소유 여부 차트 억제
+                if 'car_ownership' not in used_fields:
+                    used_fields.append("car_ownership")
 
         with ThreadPoolExecutor(max_workers=len(chart_tasks) or 1) as executor:
             futures = []
@@ -607,7 +631,12 @@ def analyze_search_results_optimized(
             for info in high_ratio:
                 charts.append({"topic": f"{info['korean_name']} 분포", "description": f"{info['top_ratio']}%가 '{info['top_category']}'입니다.", "ratio": f"{info['top_ratio']}%", "chart_data": [{"label": info['korean_name'], "values": info['distribution']}]})
 
-        return {"query": query, "total_count": len(panels_data), "main_summary": f"총 {len(panels_data)}명 데이터 분석 완료", "charts": charts}, 200
+        return {
+            "query": query, 
+            "total_count": len(panels_data), 
+            "main_summary": f"총 {len(panels_data)}명 데이터 분석 완료", 
+            "charts": charts
+        }, 200
 
     except Exception as e:
         logging.error(f"분석 중 오류: {e}", exc_info=True)

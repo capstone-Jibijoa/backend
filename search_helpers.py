@@ -13,75 +13,19 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchAny, SearchPa
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from db import get_db_connection_context
-from mapping_rules import CATEGORY_MAPPING, get_field_mapping
-
-# LLM 필드명 -> 실제 DB 필드명 매핑
-FIELD_ALIAS_MAP = {
-    "household_size": "family_size",  
-    "age": "birth_year",              
-    "job": "job_title_raw",           
-    "region": "region_major"          
-}
-
-# 실제 데이터(명사형)를 포함하도록 매핑 키워드 확장
-VALUE_TRANSLATION_MAP = {
-    'gender': {
-        '남성': 'M', '여성': 'F', '남자': 'M', '여자': 'F', 
-        'male': 'M', 'female': 'F' # 영어 추가
-    },
-    'marital_status': {
-        '미혼': '미혼', '싱글': '미혼', '기혼': '기혼', '결혼': '기혼', '이혼': '이혼', '돌싱': '이혼',
-        'single': '미혼', 'married': '기혼' # 영어 추가
-    },
-    'education_level': {
-        '고졸': ['고등학교 졸업 이하', '고등학교 졸업', '고졸'],
-        '고등학교 졸업': ['고등학교 졸업 이하', '고등학교 졸업'],
-
-        '중졸 이하': ['고등학교 졸업 이하', '중학교 졸업 이하', '중학교 졸업', '초등학교 졸업 이하', '무학'],
-        '중학교 졸업': ['고등학교 졸업 이하', '중학교 졸업 이하', '중학교 졸업'],
-
-        '대졸': ['대학교 졸업', '대학원 재학 이상', '학사', '석사', '박사'],
-        '대학교 졸업': ['대학교 졸업', '대학원 재학 이상'],
-        '대학원': ['대학원 재학 이상'],
-
-        '저학력': ['고등학교 졸업 이하', '중학교 졸업 이하', '고등학교 졸업', '중학교 졸업', '초등학교 졸업 이하'],
-        '고학력': ['대학교 졸업', '대학원 재학 이상']
-    },
-    'smoking_experience': {
-        'have_smoked': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
-        'smoker': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
-        
-        '있음': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'], 
-        '흡연': ['일반', '전자', '기타', '피우고', '피웠', '흡연', '연초', '궐련'],
-        
-        'no': ['피워본 적이', '비흡연'],
-        'none': ['피워본 적이', '비흡연'],
-        'non_smoker': ['피워본 적이', '비흡연'],
-        '없음': ['피워본 적이', '비흡연'],
-        '비흡연': ['피워본 적이', '비흡연'],
-    },
-    'drinking_experience': {
-        'have_drink': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'], # 영어 추가
-        'drinker': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'],
-        '있음': ['소주', '맥주', '와인', '막걸리', '위스키', '양주', '사케', '과일칵테일주', '저도주', '즐겨', '마신다'],
-        
-        'no': ['최근 1년 이내 술을 마시지 않음', '마시지', '비음주', '금주', '않음'], # 영어 추가
-        '없음': ['최근 1년 이내 술을 마시지 않음', '마시지', '비음주', '금주', '않음'],
-    }
-}
-
-ARRAY_FIELDS = [
-    "drinking_experience",
-    "owned_electronics",
-    "smoking_experience",
-    "smoking_brand",
-    "e_cigarette_experience"
-]
+from mapping_rules import (
+    CATEGORY_MAPPING, 
+    get_field_mapping,
+    FIELD_ALIAS_MAP, 
+    VALUE_TRANSLATION_MAP,
+    FUZZY_MATCH_FIELDS, 
+    ARRAY_FIELDS
+)
 
 def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
     """
     JSONB 데이터 타입에 맞춰 정확한 SQL WHERE 절을 생성합니다.
-    (속도 최적화를 위해 TRIM 제거 및 필드 매핑 적용)
+    (소득 범위 스마트 매핑 포함)
     """
     if not filters:
         return "", []
@@ -89,6 +33,18 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
     conditions = []
     params = []
     CURRENT_YEAR = datetime.now().year
+
+    # 소득 카테고리 정의
+    INCOME_RANGES = [
+        (0, 999999, "월 100만원 미만"),
+        (1000000, 1999999, "월 100~199만원"),
+        (2000000, 2999999, "월 200~299만원"),
+        (3000000, 3999999, "월 300~399만원"),
+        (4000000, 4999999, "월 400~499만원"),
+        (5000000, 5999999, "월 500~599만원"),
+        (6000000, 6999999, "월 600~699만원"),
+        (7000000, 999999999, "월 700만원 이상")
+    ]
 
     for f in filters:
         raw_field = f.get("field")
@@ -100,19 +56,31 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
 
         field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
+        # 1. not_null 처리
         if operator == "not_null":
-            # JSONB 필드 내에 해당 키가 존재하고, null이 아닌지 확인
             base_condition = f"(structured_data->>'{field}' IS NOT NULL AND structured_data->>'{field}' != 'NaN')"
+            exclude_pattern = ""
             
-            # 2. '없음', '해당 없음', '비흡연' 등 무의미한 텍스트도 제외 (SQL 레벨)
-            # 정규식으로 '없음', '비흡연', '피우지 않음' 등이 포함된 경우 제외
-            exclude_pattern = "없음|비흡연|해당사항|피우지|금연"
+            if field == "children_count":
+                conditions.append(f"({base_condition} AND structured_data->>'{field}' NOT IN ('0', '0명') AND structured_data->>'{field}' !~ '없음')")
+                continue
+            
+            if field == "drinking_experience":
+                exclude_pattern = "마시지|않음|없음|비음주|금주|안\\s*마심|전혀"
+            elif field == "smoking_experience":
+                exclude_pattern = "피우지|않음|없음|비흡연|금연|안\\s*피움"
+            elif field == "ott_count":
+                exclude_pattern = "0개|안\\s*함|없음|이용\\s*안|보지\\s*않음"
+            elif field == "fast_delivery_usage":
+                exclude_pattern = "안\\s*함|이용\\s*안|없음|직접\\s*구매"
+            else:
+                exclude_pattern = "없음|비흡연|해당사항|피우지|금연"
+
             refined_condition = f"({base_condition} AND structured_data->>'{field}' !~ '{exclude_pattern}')"
-            
             conditions.append(refined_condition)
             continue 
 
-        # --- 나이 계산 ---
+        # 2. 나이 계산
         if field == "birth_year" or raw_field == "age":
             if operator == "between" and isinstance(value, list) and len(value) == 2:
                 age_start, age_end = value
@@ -122,7 +90,7 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 params.extend([birth_year_start, birth_year_end])
             continue
         
-        # --- 매핑된 값으로 변환 ---
+        # 3. 값 확장 (매핑) - 영어/한글 변환 및 카테고리 확장
         final_value = value
         if field in VALUE_TRANSLATION_MAP:
             mapping = VALUE_TRANSLATION_MAP[field]
@@ -139,9 +107,19 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 mapped_v = mapping.get(value, value)
                 final_value = mapped_v
 
-        # --- JSON 배열(List) 필드 처리 ---
-        # ILIKE를 사용하여 부분 문자열 검색 (배열 -> 문자열 변환 후 검색)
-        if field in ARRAY_FIELDS:
+        if isinstance(final_value, list):
+            expanded_list = []
+            for v in final_value:
+                if str(v) in CATEGORY_MAPPING:
+                    expanded_list.extend(CATEGORY_MAPPING[str(v)])
+                else:
+                    expanded_list.append(v)
+            final_value = expanded_list
+        elif str(final_value) in CATEGORY_MAPPING:
+            final_value = CATEGORY_MAPPING[str(final_value)]
+
+        # 4. FUZZY_MATCH (ILIKE)
+        if field in FUZZY_MATCH_FIELDS or field in ARRAY_FIELDS:
             if not isinstance(final_value, list):
                 final_value = [final_value]
             
@@ -151,29 +129,44 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 params.append(f"%{v}%")
             
             if or_conditions:
-                # 긍정 키워드('술')가 있더라도 부정어('않음')가 있으면 제외하는 로직
                 exclude_sql = ""
-                
-                # 1. 음주 경험 (drinking_experience)
                 if field == "drinking_experience":
-                    # '마시지', '않음', '없음', '비음주', '금주', '안 마심' 등이 포함되면 제외
                     exclude_patterns = "마시지|않음|없음|비음주|금주|안\\s*마심|전혀"
                     exclude_sql = f" AND structured_data->>'{field}' !~ '{exclude_patterns}'"
-                
-                # 2. 흡연 경험 (smoking_experience) - 혹시 모를 비흡연자 데이터 방지
                 elif field == "smoking_experience":
                     exclude_patterns = "피우지|않음|없음|비흡연|금연|안\\s*피움"
                     exclude_sql = f" AND structured_data->>'{field}' !~ '{exclude_patterns}'"
-
                 elif field == "ott_count":
-                    # '0개', '안 함', '없음', '이용 안' 등이 포함되면 제외
                     exclude_pattern = "0개|안\\s*함|없음|이용\\s*안|보지\\s*않음"
                     conditions.append(f"({base_condition} AND structured_data->>'{field}' !~ '{exclude_pattern}')")
 
-                # 기존 OR 조건 뒤에 AND 제외 조건 붙이기
                 conditions.append(f"({' OR '.join(or_conditions)}){exclude_sql}")
 
-        # --- 숫자형 필드 처리 ---
+        # 5. 소득 필드 스마트 처리 (숫자 범위 -> 문자열 카테고리 변환)
+        elif field in ["income_household_monthly", "income_personal_monthly"] and operator in ["gte", "lte", "between"]:
+            target_categories = []
+            min_val = 0
+            max_val = 999999999
+            
+            if operator == "gte": min_val = int(final_value)
+            elif operator == "lte": max_val = int(final_value)
+            elif operator == "between":
+                min_val = int(final_value[0])
+                max_val = int(final_value[1])
+            
+            for r_min, r_max, label in INCOME_RANGES:
+                if max_val >= r_min and min_val <= r_max:
+                    target_categories.append(label)
+            
+            if target_categories:
+                str_values = [str(v) for v in target_categories]
+                placeholders = ','.join(['%s'] * len(str_values))
+                conditions.append(f"structured_data->>'{field}' IN ({placeholders})")
+                params.extend(str_values)
+            else:
+                conditions.append("1=0")
+
+        # 6. 숫자형 필드 (children_count 등)
         elif field in ["children_count"]:
             field_sql = f"(structured_data->>'{field}')::numeric"
             if operator == "between" and isinstance(final_value, list) and len(final_value) == 2:
@@ -189,30 +182,24 @@ def build_sql_from_structured_filters(filters: List[Dict]) -> Tuple[str, List]:
                 conditions.append(f"{field_sql} = %s")
                 params.append(final_value)
 
-        # --- 일반 문자열 필드 처리 ---
+        # 7. 일반 문자열 필드
         else:
             field_sql = f"structured_data->>'{field}'"
 
             if field == "family_size":
-                # 리스트인 경우 (예: 2인 가구 OR 3인 가구)
                 if isinstance(final_value, list):
                     or_conditions = []
                     for v in final_value:
                         or_conditions.append(f"{field_sql} ~ %s")
                         params.append(f"^{v}([^0-9]|$)") 
                     conditions.append(f"({' OR '.join(or_conditions)})")
-                # 단일 값인 경우
                 else:
                     conditions.append(f"{field_sql} ~ %s")
                     params.append(f"^{final_value}([^0-9]|$)")
 
             elif operator == "eq":
-                if field in ["job_title_raw", "job_duty_raw"]:
-                     conditions.append(f"{field_sql} ILIKE %s")
-                     params.append(f"%{final_value}%")
-                else:
-                     conditions.append(f"{field_sql} = %s")
-                     params.append(str(final_value))
+                conditions.append(f"{field_sql} = %s")
+                params.append(str(final_value))
 
             elif operator == "in" and isinstance(final_value, list) and final_value:
                 str_values = [str(v) for v in final_value]
@@ -328,62 +315,6 @@ def filter_negative_conditions(
     except Exception as e:
         logging.error(f"Negative 필터링 실패: {e}")
         return panel_ids
-
-def find_negative_answer_ids(
-    candidate_ids: Set[str],
-    target_field: str,
-    collection_name: str,
-    is_welcome_collection: bool = False,
-    threshold: float = 0.82 
-) -> Set[str]:
-    from mapping_rules import NEGATIVE_ANSWER_KEYWORDS
-    
-    negative_keywords = NEGATIVE_ANSWER_KEYWORDS.get(target_field)
-    if not negative_keywords or not candidate_ids:
-        return set()
-
-    try:
-        client = QdrantClient(url=os.getenv("QDRANT_HOST"))
-        embeddings = initialize_embeddings()
-        
-        negative_vectors = embeddings.embed_documents(negative_keywords)
-        
-        ids_to_exclude = set()
-        id_key_path = "metadata.panel_id" if is_welcome_collection else "panel_id"
-        
-        search_filter = Filter(
-            must=[
-                FieldCondition(key=id_key_path, match=MatchAny(any=list(candidate_ids)))
-            ]
-        )
-        
-        for neg_vec in negative_vectors:
-            hits = client.search(
-                collection_name=collection_name,
-                query_vector=neg_vec,
-                query_filter=search_filter,
-                limit=len(candidate_ids), 
-                score_threshold=threshold, 
-                with_payload=[id_key_path]
-            )
-            
-            for hit in hits:
-                if is_welcome_collection:
-                    pid = hit.payload.get('metadata', {}).get('panel_id')
-                else:
-                    pid = hit.payload.get('panel_id')
-                
-                if pid:
-                    ids_to_exclude.add(pid)
-        
-        if ids_to_exclude:
-            logging.info(f"   🚫 부정 답변 필터링: {len(ids_to_exclude)}명 제외됨 (키워드: {negative_keywords})")
-            
-        return ids_to_exclude
-
-    except Exception as e:
-        logging.error(f"부정 필터링 실패: {e}")
-        return set()
 
 @lru_cache(maxsize=None)
 def initialize_embeddings():
