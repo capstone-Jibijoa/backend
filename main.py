@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from fastapi import FastAPI, HTTPException
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -10,15 +11,22 @@ from fastapi.responses import Response
 from fastapi_cache import FastAPICache
 from fastapi_cache.backends.inmemory import InMemoryBackend
 from fastapi_cache.decorator import cache
+from insights import get_ai_summary
 
 from llm import parse_query_intelligent
 from search_helpers import initialize_embeddings
 from search import hybrid_search as hybrid_search
 import asyncio
-from mapping_rules import QPOLL_FIELD_TO_TEXT, QPOLL_ANSWER_TEMPLATES, VECTOR_CATEGORY_TO_FIELD
+from mapping_rules import (
+    QPOLL_FIELD_TO_TEXT, 
+    QPOLL_ANSWER_TEMPLATES, 
+    VECTOR_CATEGORY_TO_FIELD,
+    find_related_fields
+)
 from insights import (
     analyze_search_results_optimized as analyze_search_results,
-    get_field_mapping
+    get_field_mapping,
+    get_search_result_overview
 )
 from db import (
     log_search_query,
@@ -47,6 +55,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+class InsightRequest(BaseModel):
+    question: str
+    panel_ids: List[str] 
+
+@app.post("/api/insight/summary")
+async def api_get_insight_summary(req: InsightRequest):
+    """
+    Lite 모드용 동적 인사이트 요약
+    검색 결과(panel_ids)와 질문(question)을 받아 통계 기반 요약을 반환합니다.
+    """
+    if not req.panel_ids:
+        raise HTTPException(status_code=400, detail="분석할 패널 데이터가 없습니다.")
+    if not req.question:
+        raise HTTPException(status_code=400, detail="질문 내용이 없습니다.")
+
+    logging.info(f"📊 Insight 요청: '{req.question}' (대상: {len(req.panel_ids)}명)")
+    
+    try:
+        result = await get_ai_summary(req.panel_ids, req.question)
+        return result
+        
+    except Exception as e:
+        logging.error(f"Insight 생성 실패: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="요약 생성 중 오류가 발생했습니다.")
 
 # --- Helper Functions ---
 def truncate_text(value: Any, max_length: int = 30) -> str:
@@ -127,45 +160,53 @@ class AnalysisRequest(BaseModel):
     query: str
     search_mode: str = "weighted"
 
-def _prepare_display_fields(classification: Dict, chart_fields: Optional[List[str]] = None) -> List[Dict]:
-    relevant_categories = {"DEMO_BASIC"}
+def _prepare_display_fields(classification: Dict, query_text: str = "") -> List[Dict]:
+    """화면에 표시할 컬럼들을 결정합니다."""
+    
+    # 1. 기본 필드
+    relevant_fields = {"gender", "birth_year", "region_major"} 
+    
+    # 2. 타겟 필드 (최우선)
     target_field = classification.get('target_field')
     
+    # Q-Poll(설문) 검색인 경우, 배경 정보(직업/학력/소득) 자동 추가
+    is_qpoll_search = target_field and target_field in QPOLL_FIELD_TO_TEXT
+    if is_qpoll_search:
+        relevant_fields.update(["job_title_raw", "education_level", "income_household_monthly"])
+    
     if target_field and target_field != 'unknown':
+        relevant_fields.add(target_field)
         for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
             if target_field in fields:
-                relevant_categories.add(category)
+                relevant_fields.update(fields)
                 break
 
+    # 3. 검색 조건에 쓰인 필드들 (Filters)
     structured_filters = classification.get('structured_filters', {}) or classification.get('demographic_filters', {})
     filter_keys = []
     if isinstance(structured_filters, dict): filter_keys = structured_filters.keys()
     elif isinstance(structured_filters, list): filter_keys = [f.get('field') for f in structured_filters if f.get('field')]
+    relevant_fields.update(filter_keys)
 
-    for f_key in filter_keys:
-        for category, fields in VECTOR_CATEGORY_TO_FIELD.items():
-            if f_key in fields: relevant_categories.add(category)
+    # 4. 동적 관련 필드 추가 (query_text 기반)
+    if query_text:
+        dynamic_fields = find_related_fields(query_text)
+        relevant_fields.update(dynamic_fields)
 
-    CATEGORY_ORDER = ["DEMO_BASIC", "FAMILY_STATUS", "JOB_EDUCATION", "INCOME_LEVEL", "TECH_OWNER", "CAR_OWNER", "DRINK_HABIT", "SMOKE_HABIT"]
-    unique_fields = {}
-    priority_counter = 0
-
+    # 5. 포맷팅 및 정렬
+    final_list = []
+    
     if target_field and target_field != 'unknown':
         label = FIELD_NAME_MAP.get(target_field, target_field)
         if target_field in QPOLL_FIELD_TO_TEXT: label = QPOLL_FIELD_TO_TEXT[target_field]
-        unique_fields[target_field] = {'field': target_field, 'label': label, 'priority': priority_counter}
-        priority_counter += 1
+        final_list.append({'field': target_field, 'label': label})
+        relevant_fields.discard(target_field)
 
-    for cat in CATEGORY_ORDER:
-        if cat in relevant_categories:
-            cat_fields = VECTOR_CATEGORY_TO_FIELD.get(cat, [])
-            for field in cat_fields:
-                if field not in unique_fields:
-                    unique_fields[field] = {'field': field, 'label': FIELD_NAME_MAP.get(field, field), 'priority': priority_counter}
-                    priority_counter += 1
-    
-    final_result = sorted(list(unique_fields.values()), key=lambda x: x['priority'])
-    return final_result[:8]
+    for field in relevant_fields:
+        if field in FIELD_NAME_MAP:
+            final_list.append({'field': field, 'label': FIELD_NAME_MAP[field]})
+            
+    return final_list[:12]
  
 async def _perform_common_search(query_text: str, search_mode: str, mode: str) -> Tuple[Dict, List[str], Dict]:
     logging.info(f"🔍 공통 검색 시작: {query_text} (모드: {search_mode}, 실행: {mode})")
@@ -204,28 +245,34 @@ async def _get_ordered_welcome_data(ids_to_fetch: List[str], fields_to_fetch: Li
         with get_db_connection_context() as conn:
             if not conn: raise Exception("DB 연결 실패")
             cur = conn.cursor()
-            sql_query = "SELECT panel_id, structured_data FROM welcome_meta2 WHERE panel_id = ANY(%s::text[])"
-            cur.execute(sql_query, (ids_to_fetch,))
+            
+            query = """
+                WITH id_order (panel_id, ordering) AS (
+                    SELECT * FROM unnest(%s::text[], %s::int[])
+                )
+                SELECT t.panel_id, t.structured_data
+                FROM welcome_meta2 t
+                JOIN id_order o ON t.panel_id = o.panel_id
+                ORDER BY o.ordering;
+            """
+            cur.execute(query, (ids_to_fetch, list(range(len(ids_to_fetch)))))
             results = cur.fetchall()
-            fetched_data_map = {row[0]: row for row in results}
 
-            for pid in ids_to_fetch:
-                if pid in fetched_data_map:
-                    row_data = fetched_data_map[pid]
-                    panel_id_val, structured_data_val = row_data
-                    if not structured_data_val: continue
+            for row in results:
+                panel_id_val, structured_data_val = row
+                if not structured_data_val: continue
 
-                    display_data = {'panel_id': panel_id_val}
-                    if fields_to_fetch:
-                        for field in fields_to_fetch:
-                            if field != 'panel_id':
-                                val = structured_data_val.get(field)
-                                display_data[field] = truncate_text(val) 
-                    else:
-                        for k, v in structured_data_val.items():
-                            if k != 'panel_id':
-                                display_data[k] = truncate_text(v)
-                    table_data.append(display_data)
+                display_data = {'panel_id': panel_id_val}
+                if fields_to_fetch:
+                    for field in fields_to_fetch:
+                        if field != 'panel_id':
+                            val = structured_data_val.get(field)
+                            display_data[field] = truncate_text(val) 
+                else:
+                    for k, v in structured_data_val.items():
+                        if k != 'panel_id':
+                            display_data[k] = truncate_text(v)
+                table_data.append(display_data)
             cur.close()
     except Exception as db_e:
         logging.error(f"Table Data 조회 실패: {db_e}")
@@ -259,12 +306,23 @@ async def _get_qpoll_responses_for_table(ids_to_fetch: List[str], qpoll_fields: 
 async def search_panels(search_query: SearchQuery):
     logging.info(f"🚀 [Lite 모드] 빠른 검색 시작: {search_query.query}")
     try:
-        lite_response, full_panel_ids, classification = await _perform_common_search(search_query.query, search_query.search_mode, mode="lite")
+        start_time = time.time()
         
+        lite_response, full_panel_ids, classification = await _perform_common_search(
+            search_query.query, 
+            search_query.search_mode,
+            mode="lite"
+        )
+        
+        search_time = time.time() - start_time
+        logging.info(f"⏱️  [Lite 모드] 검색 완료: {search_time:.2f}초")
+        
+        display_fields = _prepare_display_fields(classification, query_text=search_query.query)
         ids_to_fetch = lite_response.get('final_panel_ids', [])
-        display_fields = _prepare_display_fields(classification)
-        welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
-        qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
+        
+        field_keys = [f['field'] for f in display_fields]
+        welcome_fields = [f for f in field_keys if f not in QPOLL_FIELD_TO_TEXT]
+        qpoll_fields = [f for f in field_keys if f in QPOLL_FIELD_TO_TEXT]
         
         welcome_table_data, qpoll_responses_map = await asyncio.gather(
             _get_ordered_welcome_data(ids_to_fetch, welcome_fields),
@@ -272,7 +330,7 @@ async def search_panels(search_query: SearchQuery):
         )
         
         table_data = []
-        target_field = lite_response.get('classification', {}).get('target_field')
+        target_field = classification.get('target_field') # classification에서 안전하게 가져옴
 
         for welcome_row in welcome_table_data:
             pid = welcome_row.get('panel_id')
@@ -295,15 +353,13 @@ async def search_panels(search_query: SearchQuery):
             if is_valid_row:
                 table_data.append(welcome_row)
                 
+        # classification이 존재하므로 에러 없음
         user_limit = classification.get('limit', 100)
         
-        # table_data 슬라이싱에 user_limit 사용
         final_limit = user_limit 
         lite_response['tableData'] = table_data[:final_limit] 
-        
         lite_response['display_fields'] = display_fields
         lite_response['mode'] = "lite" 
-        lite_response['search_summary'] = None
 
         if 'final_panel_ids' in lite_response: del lite_response['final_panel_ids']
         return lite_response
@@ -315,15 +371,31 @@ async def search_panels(search_query: SearchQuery):
 async def search_and_analyze(request: AnalysisRequest):
     logging.info(f"📊 [Pro 모드] 검색 + 분석 시작: {request.query}")
     try:
+        # 1. 공통 검색 수행
         pro_info, panel_ids, classification = await _perform_common_search(request.query, request.search_mode, mode="pro")
         user_limit = classification.get('limit', 100)
 
-        analysis_result, _ = await asyncio.to_thread(analyze_search_results, request.query, classification, panel_ids[:5000])
+        # 2. 차트 분석과 텍스트 요약을 병렬(Parallel)로 실행
+        results = await asyncio.gather(
+            asyncio.to_thread(analyze_search_results, request.query, classification, panel_ids[:5000]),
+            get_search_result_overview(query=request.query, panel_ids=panel_ids, classification=classification)
+        )
+
+        analysis_result_tuple = results[0] 
+        summary_text = results[1]          
+        
+        if isinstance(analysis_result_tuple, tuple):
+            analysis_result = analysis_result_tuple[0] 
+        else:
+            analysis_result = analysis_result_tuple
+
         charts = analysis_result.get('charts', []) if analysis_result else []
         
-        display_fields = _prepare_display_fields(classification)
-        welcome_fields = [item['field'] for item in display_fields if item['field'] not in QPOLL_FIELD_TO_TEXT]
-        qpoll_fields = [item['field'] for item in display_fields if item['field'] in QPOLL_FIELD_TO_TEXT]
+        display_fields = _prepare_display_fields(classification, query_text=request.query)
+        
+        field_keys = [f['field'] for f in display_fields]
+        welcome_fields = [f for f in field_keys if f not in QPOLL_FIELD_TO_TEXT]
+        qpoll_fields = [f for f in field_keys if f in QPOLL_FIELD_TO_TEXT]
 
         fetch_limit = max(user_limit * 2, 500) 
         ids_to_fetch = panel_ids[:fetch_limit]
@@ -341,7 +413,6 @@ async def search_and_analyze(request: AnalysisRequest):
             if pid and pid in qpoll_responses_map:
                 welcome_row.update(qpoll_responses_map[pid])
             
-            # 필터링 로직: Target Field만 체크
             is_valid_row = True
             if target_field in qpoll_fields:
                 val = welcome_row.get(target_field)
@@ -363,13 +434,15 @@ async def search_and_analyze(request: AnalysisRequest):
             "classification": classification,
             "display_fields": display_fields,
             "charts": charts,
-            "tableData": table_data[:user_limit], # 100개 제한
+            "search_summary": summary_text, 
+            "tableData": table_data[:user_limit], 
             "total_count": len(panel_ids), 
             "mode": 'pro'
         }
         return response_data
+
     except Exception as e:
-        logging.error(f"[Pro 모드] 실패: {e}")
+        logging.error(f"[Pro 모드] 실패: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/debug/classify")
