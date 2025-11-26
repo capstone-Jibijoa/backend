@@ -153,13 +153,14 @@ class SearchService:
             vector_matched_ids = set()
             is_structured_target = target_field and target_field not in QPOLL_FIELD_TO_TEXT
 
-            # [Case A] 정형 데이터 타겟 + SQL 필터 존재
-            if is_structured_target and filtered_panel_ids:
+            # [Case A] 정형 데이터 타겟 + SQL 필터 존재 -> 벡터 검색 생략하고 바로 반환
+            # 수정: 타겟 필드가 정형 데이터(is_structured_target)라면, 의도(intent)와 상관없이 SQL 결과만 사용
+            if filtered_panel_ids and is_structured_target:
                 logging.info(f"   🏃‍♂️ [Skip] 정형 데이터 타겟({target_field}) -> 벡터 검색 생략")
                 final_panel_ids = filtered_panel_ids
 
-            # [Case B] 벡터 검색 필요
-            elif intent and target_field:
+            # [Case B] 벡터 검색 필요 (비정형 타겟이거나 SQL 결과가 없거나, 타겟이 불분명할 때)
+            elif intent:
                 qdrant_client = get_qdrant_client()
                 query_vector = await asyncio.to_thread(self.embeddings.embed_query, intent)
                 collection_name, id_key_path, target_question_text, is_welcome = self._get_collection_config(target_field)
@@ -270,8 +271,11 @@ class SearchService:
                         filters_for_sql.append({"field": target_field, "operator": "eq", "value": key})
                         is_specific = True
                         break
-            if not is_specific:
-                filters_for_sql.append({"field": target_field, "operator": "not_null", "value": "check"})
+            
+            # [수정] 타겟 필드가 NULL이어도 검색되도록 강제 조건 제거
+            # if not is_specific:
+            #    filters_for_sql.append({"field": target_field, "operator": "not_null", "value": "check"})
+            
         return filters_for_sql
 
     def _get_collection_config(self, target_field: str) -> Tuple[str, str, Optional[str], bool]:
@@ -474,11 +478,11 @@ class SearchService:
                     val = row.get(field)
                     
                     # (A) 생년월일 -> 연령대 변환
-                    if field == 'birth_year':
-                        val = get_age_group(val)
+                    # if field == 'birth_year':
+                    #    val = get_age_group(val)
                     
                     # (B) Q-Poll 서술형 응답 -> 핵심 답변 추출
-                    elif field in QPOLL_FIELD_TO_TEXT and val:
+                    if field in QPOLL_FIELD_TO_TEXT and val:
                         val = extract_answer_from_template(field, str(val))
                         
                     # (C) 리스트 -> 문자열 변환

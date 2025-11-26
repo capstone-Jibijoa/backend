@@ -1,6 +1,7 @@
 # app/repositories/panel_repo.py
 
 import logging
+import re
 from typing import List, Dict, Set, Any, Tuple
 from app.database.connection import get_db_connection_context
 from datetime import datetime
@@ -49,7 +50,6 @@ class PanelRepository:
             logging.error(f"패널 조회 실패: {e}")
         return results
 
-    # [수정됨] 안전한 데이터 병합 로직 적용
     def get_panels_data_from_db(self, panel_id_list: List[str]) -> List[Dict]:
         if not panel_id_list:
             return []
@@ -87,13 +87,12 @@ class PanelRepository:
                     if isinstance(row[1], dict):
                         panel.update(row[1])
                     
-                    # 2. Qpoll 데이터 병합 (우선순위 데이터)
+                    # 2. Qpoll 데이터 병합
                     if row[2]: panel['category'] = row[2]
                     if row[3]: panel['gender'] = row[3] 
                     if row[5]: panel['region'] = row[5]
 
-                    # 3. 나이 데이터 처리 (안전 장치 추가)
-                    # qpoll의 age_raw가 유효한 연도로 변환될 때만 덮어씀 (0으로 덮어쓰기 방지)
+                    # 3. 나이 데이터 처리
                     if row[4]: 
                         extracted_year = extract_birth_year_from_raw(row[4])
                         if extracted_year > 1900:
@@ -163,21 +162,77 @@ class PanelRepository:
 
             field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
-            # 1. 지역(region) 처리: qpoll(q) OR welcome(t)
+            # [수정] 값 매핑 및 역방향 확장 (Reverse Expansion)
+            # 1. 정규화 (입력값 -> 표준값)
+            normalized_set = set()
+            if field in VALUE_TRANSLATION_MAP:
+                mapping = VALUE_TRANSLATION_MAP[field]
+                input_values = value if isinstance(value, list) else [value]
+                
+                for v in input_values:
+                    norm = mapping.get(v, v)
+                    if isinstance(norm, list): normalized_set.update(norm)
+                    else: normalized_set.add(norm)
+            else:
+                if isinstance(value, list): normalized_set.update(value)
+                else: normalized_set.add(value)
+
+            # 2. 역방향 확장 (표준값 -> 가능한 모든 Raw 값)
+            # DB에 '있다'로 저장되어 있고, 표준값이 '있음'이라면, '있음'으로 검색 시 '있다'도 포함해야 함
+            final_value_set = set(normalized_set)
+            if field in VALUE_TRANSLATION_MAP:
+                mapping = VALUE_TRANSLATION_MAP[field]
+                for raw_k, norm_v in mapping.items():
+                    # norm_v가 리스트일 수도 있고 값일 수도 있음
+                    is_match = False
+                    if isinstance(norm_v, list):
+                        if any(nv in normalized_set for nv in norm_v): is_match = True
+                    else:
+                        if norm_v in normalized_set: is_match = True
+                    
+                    if is_match:
+                        final_value_set.add(raw_k)
+            
+            final_value = list(final_value_set)
+
+            # 카테고리 확장 (기존 로직)
+            if isinstance(final_value, list):
+                expanded_list = []
+                for v in final_value:
+                    if str(v) in CATEGORY_MAPPING: expanded_list.extend(CATEGORY_MAPPING[str(v)])
+                    else: expanded_list.append(v)
+                final_value = expanded_list
+            elif str(final_value) in CATEGORY_MAPPING:
+                final_value = CATEGORY_MAPPING[str(final_value)]
+
+            # -------------------------------------------------------------
+            # 1. 지역(region) 처리
             if field in ['region', 'region_major']:
-                if isinstance(value, list):
+                if isinstance(final_value, list):
                     or_conditions = []
-                    for v in value:
+                    for v in final_value:
                         or_conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
                         params.extend([f"%{v}%", f"%{v}%"])
                     if or_conditions:
                         conditions.append(f"({' OR '.join(or_conditions)})")
                 else:
                     conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
-                    params.extend([f"%{value}%", f"%{value}%"])
+                    params.extend([f"%{final_value}%", f"%{final_value}%"])
                 continue
 
-            # 2. not_null 처리
+            # 2. 성별(gender) 처리
+            if field == 'gender':
+                val_list = final_value if isinstance(final_value, list) else [final_value]
+                gender_conditions = []
+                for v in val_list:
+                    gender_conditions.append(f"(t.structured_data->>'gender' = %s OR q.gender = %s)")
+                    params.extend([str(v), str(v)])
+                
+                if gender_conditions:
+                    conditions.append(f"({' OR '.join(gender_conditions)})")
+                continue
+
+            # 3. not_null 처리
             if operator == "not_null":
                 base_condition = f"(t.structured_data->>'{field}' IS NOT NULL AND t.structured_data->>'{field}' != 'NaN')"
                 exclude_pattern = ""
@@ -195,39 +250,28 @@ class PanelRepository:
                 conditions.append(f"({base_condition} AND t.structured_data->>'{field}' !~ '{exclude_pattern}')")
                 continue
 
-            # 3. 나이 계산
+            # 4. 나이(birth_year) 처리
             if field == "birth_year" or raw_field == "age":
                 if operator == "between" and isinstance(value, list) and len(value) == 2:
                     age_start, age_end = value
                     birth_year_end = CURRENT_YEAR - age_start
                     birth_year_start = CURRENT_YEAR - age_end
-                    conditions.append(f"(t.structured_data->>'birth_year')::int BETWEEN %s AND %s")
-                    params.extend([birth_year_start, birth_year_end])
+                    
+                    # [수정] SyntaxWarning 해결: 정규식 '\d' 앞에 백슬래시 하나 더 추가 ('\\d')
+                    age_condition = f"""
+                        (
+                            (CASE WHEN t.structured_data->>'birth_year' ~ '^\\d{{4}}$' 
+                                  THEN (t.structured_data->>'birth_year')::int 
+                                  ELSE NULL END BETWEEN %s AND %s)
+                            OR 
+                            (CASE WHEN q.age_raw ~ '^\\d{{4}}' 
+                                  THEN substring(q.age_raw, 1, 4)::int 
+                                  ELSE NULL END BETWEEN %s AND %s)
+                        )
+                    """
+                    conditions.append(age_condition)
+                    params.extend([birth_year_start, birth_year_end, birth_year_start, birth_year_end])
                 continue
-
-            # 4. 값 매핑
-            final_value = value
-            if field in VALUE_TRANSLATION_MAP:
-                mapping = VALUE_TRANSLATION_MAP[field]
-                if isinstance(value, list):
-                    converted_list = []
-                    for v in value:
-                        mapped_v = mapping.get(v, v)
-                        if isinstance(mapped_v, list): converted_list.extend(mapped_v)
-                        else: converted_list.append(mapped_v)
-                    final_value = converted_list
-                else:
-                    mapped_v = mapping.get(value, value)
-                    final_value = mapped_v
-
-            if isinstance(final_value, list):
-                expanded_list = []
-                for v in final_value:
-                    if str(v) in CATEGORY_MAPPING: expanded_list.extend(CATEGORY_MAPPING[str(v)])
-                    else: expanded_list.append(v)
-                final_value = expanded_list
-            elif str(final_value) in CATEGORY_MAPPING:
-                final_value = CATEGORY_MAPPING[str(final_value)]
 
             # 5. Fuzzy Match
             if field in FUZZY_MATCH_FIELDS or field in ARRAY_FIELDS:
