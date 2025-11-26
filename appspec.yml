@@ -1,20 +1,17 @@
 version: 0.0
 os: linux
 files:
-  - source: /
-    destination: /home/ec2-user/codedeploy
-
+  - source: scripts/
+    destination: /home/ec2-user/codedeploy/scripts
 hooks:
   BeforeInstall:
     - location: scripts/stop.sh
       timeout: 300
       runas: ec2-user
-
   AfterInstall:
     - location: scripts/install.sh
       timeout: 300
       runas: ec2-user
-
   ApplicationStart:
     - location: scripts/start.sh
       timeout: 300

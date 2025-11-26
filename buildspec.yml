@@ -1,20 +1,36 @@
 version: 0.2
-
 phases:
   pre_build:
     commands:
-      - echo Logging in to Amazon ECR...
-      - aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com
+      # 환경 변수 정의
+      - export ECR_REPO_NAME=jibijoa-backend
+      - export AWS_ACCOUNT_ID=121568407787
+      - export AWS_REGION=ap-southeast-2
+      - export ECR_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}
+      
+      # COMMIT_HASH 추출
+      - echo "Resolving commit hash..."
+      - export COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - echo "COMMIT_HASH=$COMMIT_HASH"
+      
+      # ECR 로그인
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URI}
+      
   build:
     commands:
-      - echo Build Docker Image
-      - docker build -t jibijoa-backend .
-      - docker tag jibijoa-backend:latest 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
+      # Docker 이미지 빌드
+      - echo "Building Docker image..."
+      - docker build -t ${ECR_URI}:${COMMIT_HASH} -t ${ECR_URI}:latest .
+      
   post_build:
     commands:
-      - echo Pushing image to ECR...
-      - docker push 121568407787.dkr.ecr.ap-southeast-2.amazonaws.com/jibijoa-backend:latest
-
+      # ECR 푸시
+      - echo "Pushing image to ECR..."
+      - docker push ${ECR_URI}:${COMMIT_HASH}
+      - docker push ${ECR_URI}:latest
+      - chmod +x scripts/*.sh
 artifacts:
   files:
-    - '**/*'
+    - appspec.yml
+    - scripts/**/*

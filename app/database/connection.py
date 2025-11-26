@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from threading import Lock
 from contextlib import contextmanager
+# from settings import settings
 
 load_dotenv()
 
