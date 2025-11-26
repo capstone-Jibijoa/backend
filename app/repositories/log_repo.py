@@ -31,8 +31,6 @@ class LogRepository:
                         (query, results_count, user_uid)
                     )
                     log_id = cur.fetchone()[0]
-                    # commit은 context manager 밖에서 수행되거나 자동 수행되어야 함
-                    # 여기서는 명시적 커밋을 수행 (autocommit 설정에 따라 다름)
                     conn.commit() 
                     return log_id
                     

@@ -73,10 +73,6 @@ class SemanticRouter:
         
         # 코사인 유사도 계산
         sims = cosine_similarity([query_vec], self.field_vectors)[0]
-        
-        # 상위 점수 로깅 (디버깅용)
-        # best_idx = np.argmax(sims)
-        # ... (기존 로깅 로직 유지 가능)
 
         # 가장 높은 유사도 찾기
         best_idx = np.argmax(sims)

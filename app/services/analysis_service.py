@@ -9,10 +9,14 @@ from app.repositories.panel_repo import PanelRepository
 from app.repositories.qpoll_repo import QpollRepository
 from app.services.llm_service import LLMService
 from app.core.semantic_router import router  
-from app.utils.text_utils import clean_label, calculate_distribution, get_age_group, truncate_text
-from app.utils.common import find_target_columns_dynamic, get_field_mapping
-
-# 매핑 규칙 및 상수
+from app.utils.common import (
+    find_target_columns_dynamic, 
+    get_field_mapping, 
+    clean_label, 
+    calculate_distribution, 
+    get_age_group, 
+    truncate_text
+)
 from app.constants.mapping import (
     FIELD_NAME_MAP, 
     QPOLL_FIELD_TO_TEXT, 
@@ -72,23 +76,27 @@ class AnalysisService:
             "charts": charts
         }, summary_text
 
-    # --------------------------------------------------------------------------
-    # [핵심] Insights.py의 지능형 차트 추천 로직 이식
-    # --------------------------------------------------------------------------
     async def _generate_charts_optimized(self, query: str, classification: Dict, panels_data: List[Dict]) -> Tuple[List[Dict], List[str]]:
         """
-        분석 우선순위:
+        심층 분석 우선순위 및 누락된 비즈니스 로직 복원:
         1. 타겟 필드 (Target Field)
-        2. 의도 분석 (Semantic Analysis) - 검색어의 숨은 뜻 파악
-        3. 검색 필터 (Demographic Filters)
-        4. 교차 분석 (Crosstab) - 차트 부족 시 자동 생성
-        5. 특이점 발견 (High Ratio) - 쏠림 현상이 있는 데이터 자동 발견
+        2. 의도 분석 (Semantic Analysis)
+        3. 필터 & 파생 로직 (Region Minor, Single Household 등) -> 복원됨
+        4. 데이터 기반 로직 (Car Ownership >= 70% -> Car Model) -> 복원됨
+        5. 교차 분석 (Crosstab)
+        6. 특이점 발견 (High Ratio)
         """
         charts = []
         used_fields = []
         chart_tasks = []
         search_used_fields = set()
 
+        # [A] 필터 정보 추출 및 기록
+        demographic_filters = classification.get('demographic_filters', {})
+        if 'age_range' in demographic_filters: search_used_fields.add('birth_year')
+        for key in demographic_filters:
+            if key != 'age_range': search_used_fields.add(key)
+        
         # (1) Target Field (0순위)
         target_field = classification.get('target_field')
         if target_field and target_field != 'unknown':
@@ -98,19 +106,24 @@ class AnalysisService:
                 chart_tasks.append({"type": "filter", "field": target_field, "priority": 0})
             used_fields.append(target_field)
 
+            # [Logic 1 복원] Q-Poll 타겟인 경우 기본 인구통계(성별, 연령, 지역) 자동 추가
+            if target_field in QPOLL_FIELD_TO_TEXT:
+                basic_demos = ['gender', 'birth_year', 'region_major']
+                for field in basic_demos:
+                    if field not in used_fields and field not in search_used_fields:
+                        chart_tasks.append({"type": "filter", "field": field, "priority": 1})
+                        used_fields.append(field)
+
         # (2) Semantic Conditions (1순위 - 의도 분석)
         semantic_conditions = classification.get('semantic_conditions', [])
         for condition in semantic_conditions:
             original_keyword = condition.get('original_keyword')
             if not original_keyword: continue
             
-            # Semantic Router 활용해 연관 필드 찾기
             field_info = router.find_closest_field(original_keyword)
             if field_info:
                 found_field = field_info['field']
                 if found_field in used_fields: continue
-                
-                logging.info(f"💡 [Insight] 2차 의도 발견: '{original_keyword}' -> '{field_info['description']}' ({found_field})")
                 
                 if found_field in QPOLL_FIELD_TO_TEXT:
                     chart_tasks.append({"type": "qpoll", "field": found_field, "priority": 1})
@@ -118,22 +131,67 @@ class AnalysisService:
                     chart_tasks.append({"type": "filter", "field": found_field, "priority": 1})
                 used_fields.append(found_field)
 
-        # (3) Demographic Filters
-        filters = classification.get('demographic_filters', {})
-        for key in filters:
+        # (3) Demographic Filters 및 파생 로직
+        # 지역 필터(region_major)가 있으면 세부 지역(region_minor) 자동 추가
+        if 'region_major' in demographic_filters and 'region_minor' not in used_fields:
+            chart_tasks.append({"type": "filter", "field": "region_minor", "priority": 2})
+            used_fields.append("region_minor")
+
+        for key in demographic_filters:
             if key not in used_fields and key != 'age_range':
                 chart_tasks.append({"type": "filter", "field": key, "priority": 2})
                 used_fields.append(key)
-                search_used_fields.add(key)
         
-        if 'age_range' in filters and 'birth_year' not in used_fields:
+        if 'age_range' in demographic_filters and 'birth_year' not in used_fields:
             chart_tasks.append({"type": "filter", "field": "birth_year", "priority": 2})
             used_fields.append('birth_year')
 
-        # [실행] 차트 데이터 생성 (병렬 처리)
+        # 1인 가구 로직
+        is_single_household = False
+        fam_val = demographic_filters.get('family_size') or demographic_filters.get('household_size')
+        if fam_val:
+            if isinstance(fam_val, list) and any(str(v).startswith('1') for v in fam_val): is_single_household = True
+            elif str(fam_val).startswith('1'): is_single_household = True
+            
+        if is_single_household and 'income_household_monthly' not in used_fields:
+            chart_tasks.append({"type": "filter", "field": "income_household_monthly", "priority": 2})
+            used_fields.append('income_household_monthly')
+
+        # 차량 소유 비율 70% 이상 시 '소유 여부' 대신 '차종' 차트 노출
+        car_ownership_values = [p.get('car_ownership') for p in panels_data if p.get('car_ownership')]
+        if car_ownership_values:
+            flat_values = []
+            car_map = VALUE_TRANSLATION_MAP.get('car_ownership', {})
+            
+            for v in car_ownership_values:
+                if isinstance(v, list):
+                    for sub_v in v:
+                        cleaned = clean_label(sub_v)
+                        flat_values.append(car_map.get(cleaned, cleaned))
+                else:
+                    cleaned = clean_label(v)
+                    flat_values.append(car_map.get(cleaned, cleaned))
+            
+            if flat_values:
+                car_dist = calculate_distribution(flat_values)
+                # '있음' 관련 응답이 70% 이상이면 차종 차트 추가
+                if car_dist.get('있음', 0) >= 70.0 or car_dist.get('있음(자가)', 0) >= 70.0:
+                    if 'car_model_raw' not in used_fields:
+                        chart_tasks.append({"type": "filter", "field": "car_model_raw", "priority": 1})
+                        used_fields.append("car_model_raw")
+                    
+                    # 차량 소유 여부 차트는 중복되므로 제거를 위해 used_fields에 등록만 해둠
+                    if 'car_ownership' not in used_fields:
+                        used_fields.append("car_ownership")
+
+        # 우선순위 정렬 (낮은 숫자가 먼저)
+        chart_tasks.sort(key=lambda x: x['priority'])
+
+        # 차트 데이터 생성 (병렬 처리)
+        final_charts = []
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
-            for task in chart_tasks:
+            for task in chart_tasks[:6]: # 상위 6개까지만 시도
                 if task['type'] == 'qpoll':
                     futures.append(executor.submit(self._create_qpoll_chart, task['field']))
                 else:
@@ -144,13 +202,15 @@ class AnalysisService:
                 try:
                     chart = future.result()
                     if chart and chart.get('chart_data'):
-                        charts.append(chart)
-                except Exception as e:
-                    logging.error(f"차트 생성 실패: {e}")
+                        final_charts.append(chart)
+                except Exception:
+                    pass
+        
+        charts.extend(final_charts[:5]) # 최종 5개 선정
 
-        # (4) [Fallback] 차트가 부족하면 교차 분석(Crosstab) 추가
+        # (5) 차트가 부족하면 교차 분석(Crosstab) 추가
         if len(charts) < 5:
-            pivot_field = target_field if target_field in used_fields else (used_fields[0] if used_fields else None)
+            pivot_field = target_field if (target_field and target_field in used_fields) else (used_fields[0] if used_fields else None)
             
             if pivot_field:
                 pivot_name = QPOLL_FIELD_TO_TEXT.get(pivot_field, FIELD_NAME_MAP.get(pivot_field, pivot_field))
@@ -161,10 +221,10 @@ class AnalysisService:
                     if ax_field == pivot_field or ax_field in search_used_fields: continue
                     
                     crosstab = self._create_crosstab_chart(panels_data, ax_field, pivot_field, ax_name, pivot_name)
-                    if crosstab:
+                    if crosstab and crosstab.get('chart_data'):
                         charts.append(crosstab)
 
-        # (5) [Fallback] 그래도 부족하면 특이점(High Ratio) 필드 자동 발굴
+        # (6) 그래도 부족하면 특이점(High Ratio) 필드 자동 발굴
         if len(charts) < 5:
             high_ratio_charts = self._find_high_ratio_fields(panels_data, exclude_fields=used_fields, max_charts=5-len(charts))
             charts.extend(high_ratio_charts)
@@ -305,19 +365,50 @@ class AnalysisService:
         return "\n\n".join(report)
 
     async def _generate_result_overview(self, query: str, panel_ids: List[str], classification: Dict, panels_data: List[Dict]) -> str:
-        df = pd.DataFrame(panels_data[:1000])
+        """
+        검색 결과 요약 텍스트 생성 (연령대/소득 분석 로직 복원)
+        """
+        if not panels_data:
+            return "데이터가 없습니다."
+
+        df = pd.DataFrame(panels_data[:1000]) # 상위 1000명 샘플링
         stats_context = []
+        
+        # 타겟 필드 통계
         target_field = classification.get('target_field')
         if target_field and target_field in df.columns:
             counts = df[target_field].value_counts(normalize=True).head(3)
             items = [f"{k}({v*100:.1f}%)" for k, v in counts.items()]
             kname = FIELD_NAME_MAP.get(target_field, target_field)
             stats_context.append(f"[{kname}]: {', '.join(items)}")
+
+        # 연령대(age_group) 변환 및 분석
+        if 'birth_year' in df.columns:
+            df['age_group'] = df['birth_year'].apply(lambda x: get_age_group(x) if x else None)
+            age_counts = df['age_group'].value_counts(normalize=True).head(3)
+            if not age_counts.empty:
+                age_desc = [f"{age}({ratio*100:.1f}%)" for age, ratio in age_counts.items()]
+                stats_context.append(f"[연령대]: {', '.join(age_desc)}")
+
+        #  기본 인구통계 (성별, 지역)
         for field in ['gender', 'region_major']:
             if field in df.columns:
                 top = df[field].value_counts(normalize=True).head(1)
                 if not top.empty:
                     k, v = top.index[0], top.values[0]
-                    stats_context.append(f"[{FIELD_NAME_MAP.get(field)}]: {k}({v*100:.1f}%)")
+                    kname = FIELD_NAME_MAP.get(field, field)
+                    # 과반수 체크 등 텍스트 강화
+                    desc = f"{k}({v*100:.1f}%)"
+                    if v >= 0.5: desc += " - 과반수 이상"
+                    stats_context.append(f"[{kname}]: {desc}")
+
+        # 소득 수준 특징 발견 (30% 이상 쏠림 시)
+        if 'income_personal_monthly' in df.columns:
+            top_income = df['income_personal_monthly'].value_counts(normalize=True).head(1)
+            if not top_income.empty and top_income.values[0] > 0.3:
+                stats_context.append(f"[주요 소득구간]: {top_income.index[0]} ({top_income.values[0]*100:.1f}%)")
+
         full_stats = "\n".join(stats_context)
+        
+        # LLM 호출
         return await self.llm_service.generate_analysis_summary(query, full_stats, len(panel_ids))
