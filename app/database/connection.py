@@ -8,7 +8,6 @@ from threading import Lock
 from contextlib import contextmanager
 # from settings import settings
 
-
 load_dotenv()
 
 _connection_pool = None

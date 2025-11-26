@@ -42,7 +42,7 @@ async def startup_event():
     # DB 초기화
     init_db()
     
-    # 모델 프리로딩 (선택사항)
+    # 모델 프리로딩 
     logging.info("🔄 AI 모델 로드 중...")
     try:
         initialize_embeddings()
@@ -70,5 +70,5 @@ def health_check():
     from app.database.connection import get_db_connection
     conn = get_db_connection()
     status = "healthy" if conn else "unhealthy"
-    if conn: conn.close() # 단순 체크용 연결 닫기
+    if conn: conn.close() 
     return {"status": status}

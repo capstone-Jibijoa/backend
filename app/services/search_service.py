@@ -11,15 +11,16 @@ from app.services.llm_prompt import parse_query_intelligent
 from app.core.embeddings import initialize_embeddings
 from app.repositories.panel_repo import PanelRepository
 from app.repositories.qpoll_repo import QpollRepository
-from app.utils.common import find_related_fields, get_negative_patterns
 from app.database.connection import get_qdrant_client  
 
 # 텍스트 유틸리티 추가 (연령대 변환, 답변 추출용)
-from app.utils.text_utils import (
+from app.utils.common import (
     truncate_text, 
     clean_label, 
     get_age_group, 
-    extract_answer_from_template
+    extract_answer_from_template,
+    find_related_fields, 
+    get_negative_patterns
 )
 
 # 상수 및 매핑 규칙
@@ -337,9 +338,50 @@ class SearchService:
             if pid: valid_ids.append(pid)
         return valid_ids
 
-    async def _apply_negative_vector_filter(self, panel_ids, neg_keywords, client, collection, threshold=0.55):
-        if not panel_ids: return set()
-        return set(panel_ids)
+    async def _apply_negative_vector_filter(self, panel_ids: Set[str], neg_keywords: List[str], client, collection_name: str, threshold: float = 0.55) -> Set[str]:
+        """
+        부정 키워드와 유사한 벡터를 가진 패널을 검색 결과에서 제외 (캡스톤 로직 복원)
+        """
+        if not panel_ids or not neg_keywords:
+            return panel_ids
+
+        logging.info(f"🚫 [Negative Filter] 제외 키워드: {neg_keywords} (Threshold: {threshold})")
+        
+        # 부정 키워드 벡터화
+        neg_vectors = await asyncio.to_thread(self.embeddings.embed_documents, neg_keywords)
+        
+        ids_to_exclude = set()
+        
+        # 각 부정 벡터에 대해 유사한 패널 검색
+        for vector in neg_vectors:
+            try:
+                # Qdrant 검색 (점수가 threshold 이상이면 제외 대상)
+                search_results = await asyncio.to_thread(
+                    client.search,
+                    collection_name=collection_name,
+                    query_vector=vector,
+                    limit=2000, # 충분히 많은 수 검색
+                    with_payload=True,
+                    score_threshold=threshold
+                )
+                
+                for hit in search_results:
+                    # 메타데이터 혹은 페이로드에서 panel_id 추출
+                    pid = hit.payload.get('panel_id')
+                    if not pid and 'metadata' in hit.payload:
+                        pid = hit.payload['metadata'].get('panel_id')
+                    
+                    if pid:
+                        ids_to_exclude.add(str(pid))
+                        
+            except Exception as e:
+                logging.error(f"부정 필터 검색 중 오류: {e}")
+
+        if ids_to_exclude:
+            logging.info(f"   ✂️ [Negative] {len(ids_to_exclude)}명 제외됨")
+        
+        # 차집합 반환
+        return panel_ids - ids_to_exclude
 
     @staticmethod
     def _normalize_text(text: str) -> str:
