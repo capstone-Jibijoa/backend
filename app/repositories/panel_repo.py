@@ -1,16 +1,11 @@
+# app/repositories/panel_repo.py
+
 import logging
 from typing import List, Dict, Set, Any, Tuple
 from app.database.connection import get_db_connection_context
 from datetime import datetime
 from app.utils.common import extract_birth_year_from_raw
-
-from app.constants.mapping import (
-    CATEGORY_MAPPING,
-    FIELD_ALIAS_MAP,
-    VALUE_TRANSLATION_MAP,
-    FUZZY_MATCH_FIELDS,
-    ARRAY_FIELDS
-)
+from app.constants.mapping import FIELD_ALIAS_MAP, VALUE_TRANSLATION_MAP, FUZZY_MATCH_FIELDS, ARRAY_FIELDS, CATEGORY_MAPPING
 
 class PanelRepository:
     def get_panel_detail(self, panel_id: str) -> Dict[str, Any]:
@@ -32,7 +27,7 @@ class PanelRepository:
         return {}
 
     def get_panels_by_ids(self, panel_ids: List[str]) -> List[Dict]:
-        """패널 ID 리스트로 데이터 조회 (단순 조회용)"""
+        """패널 ID 리스트로 데이터 조회"""
         if not panel_ids: return []
         results = []
         try:
@@ -54,11 +49,8 @@ class PanelRepository:
             logging.error(f"패널 조회 실패: {e}")
         return results
 
-    # 분석 서비스를 위한 데이터 통합 조회 메서드
+    # [수정됨] 안전한 데이터 병합 로직 적용
     def get_panels_data_from_db(self, panel_id_list: List[str]) -> List[Dict]:
-        """
-        panel_id 리스트를 받아 welcome_meta2와 qpoll_meta 데이터를 병합하여 반환합니다.
-        """
         if not panel_id_list:
             return []
         
@@ -100,9 +92,12 @@ class PanelRepository:
                     if row[3]: panel['gender'] = row[3] 
                     if row[5]: panel['region'] = row[5]
 
-                    # 3. 나이 데이터 처리
+                    # 3. 나이 데이터 처리 (안전 장치 추가)
+                    # qpoll의 age_raw가 유효한 연도로 변환될 때만 덮어씀 (0으로 덮어쓰기 방지)
                     if row[4]: 
-                        panel['birth_year'] = extract_birth_year_from_raw(row[4])
+                        extracted_year = extract_birth_year_from_raw(row[4])
+                        if extracted_year > 1900:
+                            panel['birth_year'] = extracted_year
                         panel['age_raw_text'] = row[4]
 
                     panels_data.append(panel)
@@ -115,10 +110,6 @@ class PanelRepository:
             return []
 
     def search_by_structure_filters(self, filters: List[Dict]) -> Set[str]:
-        """
-        welcome_meta2와 qpoll_meta를 LEFT JOIN하여 검색 범위를 확장
-        - 예: '강남구' 검색 시 qpoll_meta.region에서 히트되도록 함
-        """
         if not filters:
             return set()
             
@@ -131,7 +122,6 @@ class PanelRepository:
                     if not where_clause:
                         return set()
 
-                    # LEFT JOIN 추가 및 Alias t 사용
                     query = f"""
                         SELECT t.panel_id 
                         FROM welcome_meta2 t 
@@ -149,14 +139,10 @@ class PanelRepository:
         return panel_ids
 
     def _build_sql_conditions(self, filters: List[Dict]) -> Tuple[str, List]:
-        """
-        테이블 Alias(t, q)를 적용하고 Region 검색 로직을 강화한 SQL 생성기
-        """
         conditions = []
         params = []
         CURRENT_YEAR = datetime.now().year
 
-        # 소득 범위 정의
         INCOME_RANGES = [
             (0, 999999, "월 100만원 미만"),
             (1000000, 1999999, "월 100~199만원"),
@@ -177,12 +163,11 @@ class PanelRepository:
 
             field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
-            # 1. 지역(region) 필터 처리: welcome(t) OR qpoll(q)
+            # 1. 지역(region) 처리: qpoll(q) OR welcome(t)
             if field in ['region', 'region_major']:
                 if isinstance(value, list):
                     or_conditions = []
                     for v in value:
-                        # q.region(강남구 등 상세) 또는 t.structured_data(서울 등 광역) 검색
                         or_conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
                         params.extend([f"%{v}%", f"%{v}%"])
                     if or_conditions:
@@ -192,7 +177,7 @@ class PanelRepository:
                     params.extend([f"%{value}%", f"%{value}%"])
                 continue
 
-            # 2. not_null (부정어 제외 로직) -> t.structured_data 사용
+            # 2. not_null 처리
             if operator == "not_null":
                 base_condition = f"(t.structured_data->>'{field}' IS NOT NULL AND t.structured_data->>'{field}' != 'NaN')"
                 exclude_pattern = ""
@@ -210,7 +195,7 @@ class PanelRepository:
                 conditions.append(f"({base_condition} AND t.structured_data->>'{field}' !~ '{exclude_pattern}')")
                 continue
 
-            # 3. 나이 계산 -> t.structured_data 사용
+            # 3. 나이 계산
             if field == "birth_year" or raw_field == "age":
                 if operator == "between" and isinstance(value, list) and len(value) == 2:
                     age_start, age_end = value
@@ -220,7 +205,7 @@ class PanelRepository:
                     params.extend([birth_year_start, birth_year_end])
                 continue
 
-            # 4. 값 매핑 (Mapping Rule)
+            # 4. 값 매핑
             final_value = value
             if field in VALUE_TRANSLATION_MAP:
                 mapping = VALUE_TRANSLATION_MAP[field]
@@ -244,19 +229,17 @@ class PanelRepository:
             elif str(final_value) in CATEGORY_MAPPING:
                 final_value = CATEGORY_MAPPING[str(final_value)]
 
-            # 5. Fuzzy Match -> t.structured_data 사용
+            # 5. Fuzzy Match
             if field in FUZZY_MATCH_FIELDS or field in ARRAY_FIELDS:
                 if not isinstance(final_value, list): final_value = [final_value]
-                
                 or_conditions = []
                 for v in final_value:
                     or_conditions.append(f"t.structured_data->>'{field}' ILIKE %s")
                     params.append(f"%{v}%")
-                
                 if or_conditions:
                     conditions.append(f"({' OR '.join(or_conditions)})")
 
-            # 6. 소득 필드 처리 -> t.structured_data 사용
+            # 6. 소득 필드
             elif field in ["income_household_monthly", "income_personal_monthly"] and operator in ["gte", "lte", "between"]:
                 target_categories = []
                 min_val, max_val = 0, 999999999
@@ -276,7 +259,7 @@ class PanelRepository:
                 else:
                     conditions.append("1=0")
 
-            # 7. 일반 처리 -> t.structured_data 사용
+            # 7. 일반 처리
             else:
                 field_sql = f"t.structured_data->>'{field}'"
                 if operator == "eq":
@@ -290,9 +273,8 @@ class PanelRepository:
 
         if not conditions: return "", []
         return " WHERE " + " AND ".join(conditions), params
-    
+
     def get_field_distribution(self, field_name: str, limit: int = 50) -> Dict[str, float]:
-        """필드 분포 집계"""
         distribution = {}
         try:
             with get_db_connection_context() as conn:
@@ -331,7 +313,6 @@ class PanelRepository:
                             FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL
                             GROUP BY 1 ORDER BY 3 DESC LIMIT {limit}
                         """
-                    
                     cur.execute(query)
                     distribution = {row[0]: float(row[2]) for row in cur.fetchall() if row[0]}
         except Exception as e:

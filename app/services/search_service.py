@@ -415,14 +415,13 @@ class SearchService:
 
         final_list = []
 
-        # [1] Target Field (맨 앞)
+        # [1] Target Field 
         if target_field and target_field != 'unknown':
             label = QPOLL_FIELD_TO_TEXT.get(target_field, FIELD_NAME_MAP.get(target_field, target_field))
             final_list.append({'field': target_field, 'label': label})
             relevant_fields.discard(target_field)
 
         # [2] 주요 인구통계 (고정 순서: 성별 -> 나이 -> 지역 -> 직업 -> 학력 -> 소득)
-        # 이 리스트에 있는 필드가 relevant_fields에 있다면, 이 순서대로 먼저 추가합니다.
         priority_order = [
             "gender", "birth_year", "region_major", 
             "job_title_raw", "education_level", "income_household_monthly",
@@ -432,7 +431,7 @@ class SearchService:
         for field in priority_order:
             if field in relevant_fields:
                 final_list.append({'field': field, 'label': FIELD_NAME_MAP.get(field, field)})
-                relevant_fields.discard(field) # 추가했으니 집합에서 제거
+                relevant_fields.discard(field) 
 
         # [3] 나머지 필드 (알파벳순 또는 임의 순서)
         remaining_fields = sorted(list(relevant_fields))
@@ -446,7 +445,7 @@ class SearchService:
 
     def _merge_table_data(self, welcome_data: List[Dict], qpoll_data: Dict, display_fields: List[Dict], classification: Dict) -> List[Dict]:
         """
-        [최종 수정] DB 데이터 + Qdrant 데이터 병합 + 필드 값 가공 + *필요한 컬럼만 필터링*
+        DB 데이터 + Qdrant 데이터 병합 + 필드 값 가공 + *필요한 컬럼만 필터링*
         """
         merged = []
         target_field = classification.get('target_field')
@@ -455,7 +454,7 @@ class SearchService:
         for row in welcome_data:
             pid = row.get('panel_id')
             
-            # 1. QPoll 데이터 병합 (원본 row에 업데이트)
+            # 1. QPoll 데이터 병합 
             if pid and pid in qpoll_data:
                 row.update(qpoll_data[pid])
             
@@ -468,7 +467,7 @@ class SearchService:
             
             # 3. 데이터 가공 및 '선별된 컬럼만' 담기
             if is_valid_row:
-                # [핵심 수정] 원본 row를 그대로 쓰지 않고, 보여줄 데이터만 담을 새 딕셔너리 생성
+                # 원본 row를 그대로 쓰지 않고, 보여줄 데이터만 담을 새 딕셔너리 생성
                 filtered_row = {'panel_id': pid} 
                 
                 for field in field_keys:

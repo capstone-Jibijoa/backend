@@ -399,6 +399,12 @@ class AnalysisService:
             if not age_counts.empty:
                 age_desc = [f"{age}({ratio*100:.1f}%)" for age, ratio in age_counts.items()]
                 stats_context.append(f"[연령대 분포]: {', '.join(age_desc)}")
+
+        if 'income_personal_monthly' in df.columns:
+            top_income = df['income_personal_monthly'].value_counts(normalize=True).head(2) 
+            if not top_income.empty:
+                income_strs = [f"{k}({v*100:.1f}%)" for k, v in top_income.items()]
+                stats_context.append(f"[개인 월소득 분포]: {', '.join(income_strs)}")
         
         # 기타 주요 인구통계 (성별, 지역, 직업 등)
         interest_fields = ['gender', 'region_major', 'job_title_raw', 'income_household_monthly', 'marital_status']
