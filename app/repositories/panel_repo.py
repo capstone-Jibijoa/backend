@@ -162,8 +162,7 @@ class PanelRepository:
 
             field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
 
-            # [수정] 값 매핑 및 역방향 확장 (Reverse Expansion)
-            # 1. 정규화 (입력값 -> 표준값)
+            # [값 매핑 및 역방향 확장]
             normalized_set = set()
             if field in VALUE_TRANSLATION_MAP:
                 mapping = VALUE_TRANSLATION_MAP[field]
@@ -177,13 +176,10 @@ class PanelRepository:
                 if isinstance(value, list): normalized_set.update(value)
                 else: normalized_set.add(value)
 
-            # 2. 역방향 확장 (표준값 -> 가능한 모든 Raw 값)
-            # DB에 '있다'로 저장되어 있고, 표준값이 '있음'이라면, '있음'으로 검색 시 '있다'도 포함해야 함
             final_value_set = set(normalized_set)
             if field in VALUE_TRANSLATION_MAP:
                 mapping = VALUE_TRANSLATION_MAP[field]
                 for raw_k, norm_v in mapping.items():
-                    # norm_v가 리스트일 수도 있고 값일 수도 있음
                     is_match = False
                     if isinstance(norm_v, list):
                         if any(nv in normalized_set for nv in norm_v): is_match = True
@@ -195,7 +191,6 @@ class PanelRepository:
             
             final_value = list(final_value_set)
 
-            # 카테고리 확장 (기존 로직)
             if isinstance(final_value, list):
                 expanded_list = []
                 for v in final_value:
@@ -257,7 +252,7 @@ class PanelRepository:
                     birth_year_end = CURRENT_YEAR - age_start
                     birth_year_start = CURRENT_YEAR - age_end
                     
-                    # [수정] SyntaxWarning 해결: 정규식 '\d' 앞에 백슬래시 하나 더 추가 ('\\d')
+                    # 정규식 '\d' 앞에 백슬래시 하나 더 추가 ('\\d')
                     age_condition = f"""
                         (
                             (CASE WHEN t.structured_data->>'birth_year' ~ '^\\d{{4}}$' 
@@ -303,7 +298,32 @@ class PanelRepository:
                 else:
                     conditions.append("1=0")
 
-            # 7. 일반 처리
+            # 7. 숫자형 필드 처리 (family_size, children_count)
+            elif field in ['family_size', 'children_count']:
+                field_sql = f"t.structured_data->>'{field}'"
+                
+                # 문자열에서 숫자만 추출하여 비교 (예: "4명" -> 4)
+                # regexp_replace에서 '\d' 대신 '[0-9]' 사용이 더 안전할 수 있음
+                numeric_extract_sql = f"NULLIF(REGEXP_REPLACE({field_sql}, '[^0-9]', '', 'g'), '')::int"
+                
+                if operator == "eq":
+                    conditions.append(f"{numeric_extract_sql} = %s")
+                    params.append(int(final_value))
+                elif operator == "in" and isinstance(final_value, list) and final_value:
+                    placeholders = ','.join(['%s'] * len(final_value))
+                    conditions.append(f"{numeric_extract_sql} IN ({placeholders})")
+                    params.extend([int(v) for v in final_value])
+                elif operator == "gte":
+                    conditions.append(f"{numeric_extract_sql} >= %s")
+                    params.append(int(final_value))
+                elif operator == "lte":
+                    conditions.append(f"{numeric_extract_sql} <= %s")
+                    params.append(int(final_value))
+                elif operator == "between" and isinstance(final_value, list) and len(final_value) == 2:
+                    conditions.append(f"{numeric_extract_sql} BETWEEN %s AND %s")
+                    params.extend([int(final_value[0]), int(final_value[1])])
+
+            # 8. 일반 처리
             else:
                 field_sql = f"t.structured_data->>'{field}'"
                 if operator == "eq":
@@ -346,10 +366,11 @@ class PanelRepository:
                         query = f"""
                             SELECT 
                                 CONCAT((structured_data->>'{field_name}')::numeric::int, '명') as val, 
-                                COUNT(*), ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)
+                                COUNT(*) as count,
+                                ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as percentage
                             FROM welcome_meta2
                             WHERE structured_data->>'{field_name}' IS NOT NULL
-                            GROUP BY val ORDER BY 3 DESC LIMIT {limit}
+                            GROUP BY val ORDER BY percentage DESC LIMIT {limit}
                         """
                     else:
                         query = f"""
