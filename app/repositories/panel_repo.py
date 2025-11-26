@@ -83,7 +83,6 @@ class PanelRepository:
             
         return panel_ids
 
-    # [누락되었던 핵심 메서드 추가]
     def get_field_distribution(self, field_name: str, limit: int = 50) -> Dict[str, float]:
         """
         특정 필드의 전체 분포(%)를 DB에서 집계 (차트용)

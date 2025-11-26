@@ -5,7 +5,7 @@ from typing import List, Dict, Optional
 from qdrant_client.http.models import Filter, FieldCondition, MatchAny, MatchValue
 
 from app.database.connection import get_qdrant_client
-from app.utils.text_utils import extract_answer_from_template
+from app.utils.common import extract_answer_from_template
 from app.constants.mapping import QPOLL_FIELD_TO_TEXT 
 
 class QpollRepository:
