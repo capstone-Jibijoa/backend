@@ -218,3 +218,14 @@ API Response
 - Pandas
 - NumPy
 - Scikit-learn (Cosine Similarity)
+
+### 🛠️ 실행 방법
+
+#### 1. 가상환경 활성화
+.\venv\Scripts\activate
+
+#### 2. API 서버 실행
+uvicorn main:app --reload
+
+uvicorn main:app --reload --log-config log_config.json
+
