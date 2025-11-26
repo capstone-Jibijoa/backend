@@ -30,6 +30,10 @@ Extract ONLY explicit matches for these fields:
 - **Asset**: `car_ownership` (Only 'have car' or 'no car').
 *Note: Do NOT infer missing data. Exclude smoking/drinking/appliances here.*
 
+**IMPORTANT for Numeric Fields**:
+- If user says "has children" or "parent", set `children_count`: {"gte": 1}.
+- Do NOT output string values (e.g., "있는", "Y") for `children_count` or `family_size`. Always use numeric ranges or integers.
+
 ### 2. Semantic Conditions (Vector Search)
 Extract all other subjective intents, hobbies, habits, and specific item ownerships (e.g., specific car model, phone type).
 - **Negative Handling**: Mark "don't", "no", "hate" (e.g., "안 하는", "없는") as **`is_negative: true`**.
