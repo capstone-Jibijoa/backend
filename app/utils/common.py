@@ -2,7 +2,7 @@ import re
 import logging
 import json
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Union, Tuple
 from collections import Counter
 from functools import lru_cache
 
@@ -53,6 +53,17 @@ def calculate_age_from_birth_year(birth_year: Any, current_year: int = None) -> 
         b_year = int(str(birth_year).split('.')[0])
         return current_year - b_year
     except:
+        return 0
+    
+def extract_birth_year_from_raw(age_raw: str) -> int:
+    """
+    '1971년 03월 07일 (만 54세)' 형태의 문자열에서 연도(1971)만 추출
+    """
+    if not age_raw or not isinstance(age_raw, str):
+        return 0
+    try:
+        return int(age_raw[:4])
+    except ValueError:
         return 0
 
 def get_age_group(birth_year: Any) -> str:
@@ -215,3 +226,67 @@ def find_target_columns_dynamic(question: str) -> List[str]:
 
     logging.info(f"✅ 매핑 완료: {final_columns}")
     return final_columns
+
+def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Union[str, List[str]]]) -> List[Dict]:
+    """
+    [기능]
+    get_panels_data_from_db()로 병합된 패널 데이터 리스트를 입력받아,
+    메모리 상에서 지역(region) 및 성별(gender) 등의 조건으로 필터링합니다.
+
+    [특징]
+    - 'region' 필터 시: qpoll_meta의 'region'이 있으면 그것을, 없으면 welcome_meta2의 'region_major'를 확인합니다.
+    - 'gender' 필터 시: 병합된 'gender' 값을 확인합니다.
+    - 리스트 입력 지원: filters={'region': ['서울', '경기']} 와 같이 다중 선택이 가능합니다.
+
+    [사용 예시]
+    filtered = filter_merged_panels(all_panels, {'region': ['서울'], 'gender': '여성'})
+    """
+    if not panels_data or not filters:
+        return panels_data
+
+    filtered_list = []
+
+    for panel in panels_data:
+        is_match = True
+
+        for key, condition in filters.items():
+            # 1. 비교할 패널의 값 추출 (우선순위 로직 적용)
+            panel_value = None
+            
+            if key == 'region':
+                # region(Qpoll) 우선 확인 -> 없으면 region_major(Welcome) 확인
+                panel_value = panel.get('region') or panel.get('region_major')
+            elif key == 'gender':
+                panel_value = panel.get('gender')
+            else:
+                # 그 외 필드는 키 그대로 확인
+                panel_value = panel.get(key)
+
+            # 데이터 정제 (공백 제거 등)
+            if isinstance(panel_value, str):
+                panel_value = panel_value.strip()
+
+            # 2. 조건 비교
+            if condition:
+                if isinstance(condition, list):
+                    # 필터가 리스트인 경우 (OR 조건): ['서울', '경기'] 중 하나라도 포함되면 통과
+                    # (부분 일치 허용: "서울특별시" == "서울")
+                    match_found = False
+                    for cond_item in condition:
+                        if panel_value and str(cond_item) in str(panel_value):
+                            match_found = True
+                            break
+                    if not match_found:
+                        is_match = False
+                else:
+                    # 필터가 단일 값인 경우
+                    if not panel_value or str(condition) not in str(panel_value):
+                        is_match = False
+            
+            if not is_match:
+                break  # 하나라도 조건 불일치 시 해당 패널 제외
+        
+        if is_match:
+            filtered_list.append(panel)
+
+    return filtered_list

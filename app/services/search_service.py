@@ -388,9 +388,6 @@ class SearchService:
         if not text: return ""
         return re.sub(r'[^a-zA-Z0-9가-힣]', '', text)
 
-    # --------------------------------------------------------------------------
-    # [수정] 컬럼 순서 고정 로직 (중요!)
-    # --------------------------------------------------------------------------
     def _prepare_display_fields(self, classification: Dict, query_text: str) -> List[Dict]:
         """
         화면에 표시할 컬럼을 결정하고 '고정된 우선순위'로 정렬합니다.
