@@ -112,7 +112,7 @@ API Response
 
 **담당:** `panel_repo.py`
 
-**사용 DB:** PostgreSQL `welcome_meta2 (JSONB)`
+**사용 DB:** PostgreSQL `welcome_meta2 (JSONB)`, 'qpoll_meta'
 
 - 나이대 변환
 - 지역명/성별/직업 매핑
