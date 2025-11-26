@@ -34,7 +34,7 @@ def clean_label(text: Any, max_length: int = 25) -> str:
         return cleaned[:max_length] + ".."
     return cleaned
 
-def truncate_text(value: Any, max_length: int = 30) -> str:
+def truncate_text(value: Any, max_length: int = 20) -> str:
     """긴 텍스트 말줄임"""
     if value is None: return ""
     if isinstance(value, list):
@@ -182,7 +182,7 @@ def find_target_columns_dynamic(question: str) -> List[str]:
 
 def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Any]) -> List[Dict]:
     """
-    병합 패널 필터링 (개선된 유연한 비교 로직)
+    병합 패널 필터링 (개선된 유연한 비교 로직, 범위 연산자 지원)
     """
     if not panels_data or not filters:
         return panels_data
@@ -234,7 +234,6 @@ def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Any]) -> Li
                         continue 
                     except:
                         pass
-                # 나이 정보가 없으면 SQL 필터 결과를 신뢰하고 통과
                 continue 
 
             # [Case 3] 일반 필드 값 가져오기
@@ -249,16 +248,35 @@ def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Any]) -> Li
             if norm_val == str_val and str_val.capitalize() in VALUE_NORMALIZATION:
                 norm_val = VALUE_NORMALIZATION[str_val.capitalize()]
 
-            # 2. 숫자 추출 (숫자형 필드 비교용 - family_size, children_count 등)
+            # 2. 숫자 추출 (숫자형 필드 비교용)
             numeric_val = None
-            # key가 family_size나 children_count인 경우에만 숫자 추출 시도
             if key in ['family_size', 'children_count'] or str_val.isdigit() or (str_val and str_val[:-1].isdigit()):
                  temp_numeric = re.sub(r'[^0-9]', '', str_val)
                  if temp_numeric:
                      numeric_val = int(temp_numeric)
 
             if condition:
-                # 조건을 리스트로 통일하여 처리
+                # [NEW] 딕셔너리형 조건(gte, lte, between) 처리
+                if isinstance(condition, dict) and any(op in condition for op in ['gte', 'lte', 'min', 'max']):
+                    if numeric_val is None:
+                        is_match = False
+                        drop_reason = f"숫자 변환 실패 (키:{key}, 값:{str_val})"
+                        break
+                    
+                    min_v = condition.get('gte') or condition.get('min')
+                    max_v = condition.get('lte') or condition.get('max')
+                    
+                    if min_v is not None and numeric_val < min_v:
+                        is_match = False
+                        drop_reason = f"범위 미달 (키:{key}, 값:{numeric_val} < {min_v})"
+                        break
+                    if max_v is not None and numeric_val > max_v:
+                        is_match = False
+                        drop_reason = f"범위 초과 (키:{key}, 값:{numeric_val} > {max_v})"
+                        break
+                    continue
+
+                # 리스트/단일값 처리
                 cond_list = condition if isinstance(condition, list) else [condition]
                 match_found = False
                 
@@ -266,24 +284,23 @@ def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Any]) -> Li
                     raw_cond = str(cond_item)
                     norm_cond = VALUE_NORMALIZATION.get(raw_cond, raw_cond)
                     
-                    # 조건값에서도 숫자 추출
                     numeric_cond = None
                     temp_cond_numeric = re.sub(r'[^0-9]', '', raw_cond)
                     if temp_cond_numeric:
                         numeric_cond = int(temp_cond_numeric)
 
-                    # 비교 로직 1: 문자열 포함 관계 (원본 및 정규화된 값 양방향 확인)
+                    # 비교 로직 1: 문자열 포함
                     if (raw_cond in str_val) or (norm_cond in str_val) or \
                        (str_val in raw_cond) or (norm_val in raw_cond):
                         match_found = True
                         break
                     
-                    # 비교 로직 2: 정규화된 값 간의 완전 일치
+                    # 비교 로직 2: 완전 일치
                     if str_val == raw_cond or str_val == norm_cond or norm_val == raw_cond or norm_val == norm_cond:
                         match_found = True
                         break
                     
-                    # 비교 로직 3: 숫자값 비교 (가족 수, 자녀 수 등)
+                    # 비교 로직 3: 숫자값 비교
                     if numeric_val is not None and numeric_cond is not None and numeric_val == numeric_cond:
                         match_found = True
                         break

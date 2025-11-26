@@ -201,6 +201,12 @@ class PanelRepository:
                 final_value = CATEGORY_MAPPING[str(final_value)]
 
             # -------------------------------------------------------------
+            # [CRITICAL FIX] 리스트 형태의 단일 값 처리 (e.g., [1] -> 1)
+            val_to_use = final_value
+            if isinstance(final_value, list) and len(final_value) == 1:
+                val_to_use = final_value[0]
+            # -------------------------------------------------------------
+
             # 1. 지역(region) 처리
             if field in ['region', 'region_major']:
                 if isinstance(final_value, list):
@@ -212,7 +218,7 @@ class PanelRepository:
                         conditions.append(f"({' OR '.join(or_conditions)})")
                 else:
                     conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
-                    params.extend([f"%{final_value}%", f"%{final_value}%"])
+                    params.extend([f"%{val_to_use}%", f"%{val_to_use}%"])
                 continue
 
             # 2. 성별(gender) 처리
@@ -252,7 +258,6 @@ class PanelRepository:
                     birth_year_end = CURRENT_YEAR - age_start
                     birth_year_start = CURRENT_YEAR - age_end
                     
-                    # 정규식 '\d' 앞에 백슬래시 하나 더 추가 ('\\d')
                     age_condition = f"""
                         (
                             (CASE WHEN t.structured_data->>'birth_year' ~ '^\\d{{4}}$' 
@@ -283,8 +288,9 @@ class PanelRepository:
                 target_categories = []
                 min_val, max_val = 0, 999999999
                 
-                if operator == "gte": min_val = int(final_value)
-                elif operator == "lte": max_val = int(final_value)
+                # val_to_use 사용
+                if operator == "gte": min_val = int(val_to_use)
+                elif operator == "lte": max_val = int(val_to_use)
                 elif operator == "between": min_val, max_val = int(final_value[0]), int(final_value[1])
                 
                 for r_min, r_max, label in INCOME_RANGES:
@@ -300,35 +306,58 @@ class PanelRepository:
 
             # 7. 숫자형 필드 처리 (family_size, children_count)
             elif field in ['family_size', 'children_count']:
+                # 리스트 값이 들어올 경우 첫 번째 값 추출 (ex: [1] -> 1)
+                val_to_use = final_value
+                if isinstance(final_value, list) and len(final_value) == 1:
+                    val_to_use = final_value[0]
+
                 field_sql = f"t.structured_data->>'{field}'"
                 
-                # 문자열에서 숫자만 추출하여 비교 (예: "4명" -> 4)
-                # regexp_replace에서 '\d' 대신 '[0-9]' 사용이 더 안전할 수 있음
+                # 문자열에서 숫자만 추출 (예: "4명" -> 4)
                 numeric_extract_sql = f"NULLIF(REGEXP_REPLACE({field_sql}, '[^0-9]', '', 'g'), '')::int"
                 
                 if operator == "eq":
-                    conditions.append(f"{numeric_extract_sql} = %s")
-                    params.append(int(final_value))
+                    # val_to_use 사용
+                    if str(val_to_use).isdigit():
+                        conditions.append(f"{numeric_extract_sql} = %s")
+                        params.append(int(val_to_use))
+                    else:
+                        logging.warning(f"⚠️ [SQL Build] '{field}' 필드 eq 조건 오류: {val_to_use}")
+
                 elif operator == "in" and isinstance(final_value, list) and final_value:
-                    placeholders = ','.join(['%s'] * len(final_value))
-                    conditions.append(f"{numeric_extract_sql} IN ({placeholders})")
-                    params.extend([int(v) for v in final_value])
+                    valid_nums = [int(v) for v in final_value if str(v).isdigit()]
+                    if valid_nums:
+                        placeholders = ','.join(['%s'] * len(valid_nums))
+                        conditions.append(f"{numeric_extract_sql} IN ({placeholders})")
+                        params.extend(valid_nums)
+
                 elif operator == "gte":
-                    conditions.append(f"{numeric_extract_sql} >= %s")
-                    params.append(int(final_value))
+                    # val_to_use 사용
+                    if str(val_to_use).isdigit():
+                        conditions.append(f"{numeric_extract_sql} >= %s")
+                        params.append(int(val_to_use))
+                    else:
+                        logging.warning(f"⚠️ [SQL Build] '{field}' gte 조건 값 오류: {val_to_use}")
+
                 elif operator == "lte":
-                    conditions.append(f"{numeric_extract_sql} <= %s")
-                    params.append(int(final_value))
+                    if str(val_to_use).isdigit():
+                        conditions.append(f"{numeric_extract_sql} <= %s")
+                        params.append(int(val_to_use))
+                    else:
+                        logging.warning(f"⚠️ [SQL Build] '{field}' lte 조건 값 오류: {val_to_use}")
+
                 elif operator == "between" and isinstance(final_value, list) and len(final_value) == 2:
-                    conditions.append(f"{numeric_extract_sql} BETWEEN %s AND %s")
-                    params.extend([int(final_value[0]), int(final_value[1])])
+                    v1, v2 = final_value
+                    if str(v1).isdigit() and str(v2).isdigit():
+                        conditions.append(f"{numeric_extract_sql} BETWEEN %s AND %s")
+                        params.extend([int(v1), int(v2)])
 
             # 8. 일반 처리
             else:
                 field_sql = f"t.structured_data->>'{field}'"
                 if operator == "eq":
                     conditions.append(f"{field_sql} = %s")
-                    params.append(str(final_value))
+                    params.append(str(val_to_use))
                 elif operator == "in" and isinstance(final_value, list) and final_value:
                     str_values = [str(v) for v in final_value]
                     placeholders = ','.join(['%s'] * len(str_values))

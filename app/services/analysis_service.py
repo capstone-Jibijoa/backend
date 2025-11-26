@@ -93,7 +93,6 @@ class AnalysisService:
 
     async def _generate_charts_optimized(self, query: str, classification: Dict, panels_data: List[Dict]) -> Tuple[List[Dict], List[str]]:
         """
-        [Capstone Logic 복원]
         1. 검색 조건(필터)에 사용된 필드는 'search_used_fields'로 등록하여 중복/당연한 차트 생성을 방지합니다.
         2. 파생 로직(지역->세부지역, 자녀->결혼무시, 차량->차종)을 우선 적용합니다.
         3. Semantic Intent 및 Target Field를 시각화합니다.
@@ -114,7 +113,8 @@ class AnalysisService:
 
         # [Logic 1] 자녀 필터 있으면 결혼 상태 차트는 무의미하므로 제외 처리
         if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
-            used_fields.append('marital_status')
+            # [FIX] 자녀가 있으면 99% 기혼이므로, 결혼 여부 차트는 정보 가치가 낮아 생성 제외 대상에 추가
+            search_used_fields.add('marital_status')
 
         # [Logic 2] 지역 필터(Region Major) 있으면 -> 세부 지역(Region Minor) 차트 자동 추가 (0순위)
         if 'region_major' in demographic_filters and 'region_minor' not in used_fields:
@@ -132,14 +132,17 @@ class AnalysisService:
                 used_fields.append(target_field)
                 
                 # [Logic 3] Q-Poll 타겟이면 기본 인구통계(성별, 연령, 지역) 자동 추가 (1순위)
+                # 단, 이미 검색 조건으로 쓰인 필드는 제외
                 basic_demos = ['gender', 'birth_year', 'region_major']
                 for field in basic_demos:
                     if field not in used_fields and field not in search_used_fields:
                         chart_tasks.append({"type": "filter", "field": field, "priority": 1})
                         used_fields.append(field)
             else:
-                chart_tasks.append({"type": "filter", "field": target_field, "priority": priority})
-                used_fields.append(target_field)
+                # 타겟 필드가 정형 데이터인 경우
+                if target_field not in search_used_fields:
+                    chart_tasks.append({"type": "filter", "field": target_field, "priority": priority})
+                    used_fields.append(target_field)
 
         # [C] Semantic Conditions (1순위) - 사용자의 의도 파악
         for condition in semantic_conditions:
@@ -157,7 +160,9 @@ class AnalysisService:
                 if found_field in QPOLL_FIELD_TO_TEXT:
                     chart_tasks.append({"type": "qpoll", "field": found_field, "priority": prio})
                 else:
-                    chart_tasks.append({"type": "filter", "field": found_field, "priority": prio})
+                    # 이미 필터로 쓴 정형 데이터는 차트에서 제외 (예: "남성" -> 성별 차트 X)
+                    if found_field not in search_used_fields:
+                        chart_tasks.append({"type": "filter", "field": found_field, "priority": prio})
                 used_fields.append(found_field)
 
         # [Logic 4] 차량 소유 비율 70% 이상 시 '차종(Car Model)' 자동 분석
@@ -175,7 +180,7 @@ class AnalysisService:
                     chart_tasks.append({"type": "filter", "field": "car_model_raw", "priority": 1})
                     used_fields.append("car_model_raw")
                 if 'car_ownership' not in used_fields:
-                    used_fields.append("car_ownership") # 소유 여부 차트는 중복되므로 제외 처리
+                    pass 
 
         # 실행: Priority 순으로 정렬하여 차트 생성
         chart_tasks.sort(key=lambda x: x['priority'])
@@ -196,7 +201,8 @@ class AnalysisService:
                     if res and res.get('chart_data'):
                         # [검증] 값이 99% 이상 하나로 쏠려있고, 그것이 검색 필터라면 제외 (Obvious Chart)
                         vals = list(res['chart_data'][0]['values'].values())
-                        if vals and vals[0] > 99.0 and res.get('field') in search_used_fields:
+                        # 예: 남성만 검색했는데 성별 차트가 나오면 100% 남성이므로 제외
+                        if vals and vals[0] > 95.0 and res.get('field') in search_used_fields:
                             continue 
                         charts.append(res)
                 except Exception:
@@ -211,6 +217,7 @@ class AnalysisService:
                 
                 for ax_field, ax_name in standard_axes:
                     if len(charts) >= 5: break
+                    # 축으로 사용할 필드가 이미 100% 쏠린 필드(검색 조건)라면 건너뜀
                     if ax_field == pivot_field or ax_field in search_used_fields: continue
                     
                     crosstab = self._create_crosstab_chart(panels_data, ax_field, pivot_field, ax_name, pivot_name)
@@ -221,6 +228,11 @@ class AnalysisService:
         if len(charts) < 5:
             # 이미 사용된 필드와 검색 필터를 제외한 나머지 중에서 찾기
             exclude_for_high_ratio = list(set(used_fields) | search_used_fields)
+            
+            # [New Logic] '결혼 여부'도 자녀 조건이 있으면 제외 대상에 추가
+            if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
+                exclude_for_high_ratio.append('marital_status')
+
             high_ratio_charts = self._find_high_ratio_fields(panels_data, exclude_fields=exclude_for_high_ratio, max_charts=5-len(charts))
             charts.extend(high_ratio_charts)
 
@@ -286,7 +298,8 @@ class AnalysisService:
             if not dist: continue
             top_k, top_v = sorted(dist.items(), key=lambda x: x[1], reverse=True)[0]
             
-            if 50.0 <= top_v < 98.0:
+            # 기준 완화: 40% 이상 ~ 95% 미만 (너무 뻔한 99% 데이터는 제외)
+            if 40.0 <= top_v < 95.0:
                 results.append({
                     "topic": f"{kname} 특징",
                     "description": f"전체의 {top_v}%가 '{top_k}'입니다.",
