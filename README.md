@@ -195,6 +195,107 @@ API Response
 
 ---
 
+# 📊 Insight Generation Logic
+
+사용자의 검색 결과를 기반으로 의미 있는 인사이트를 자동으로 시각화하기 위한 **우선순위 기반 차트 생성 알고리즘**입니다. 단순 데이터 나열이 아닌, *새로운 정보·의미 있는 패턴*을 우선 제공하는 것을 목표로 합니다.
+
+---
+
+## 🎯 Core Principle: Obviousness Filtering
+
+"**이미 사용자가 알고 있는 정보는 제외하고, 새로운 인사이트를 우선적으로 제공한다.**"
+
+- 검색 조건에 이미 포함된 필드(예: 사용자가 “20대”로 검색 → 연령 분포 차트 제외)
+- 응답이 극단적으로 한쪽으로 쏠린 경우(최대값 95% 이상) → 정보 가치 낮음 → 제외
+
+---
+
+## ⚙️ Chart Priority Algorithm
+
+차트 생성 시 우선순위를 **Priority Queue 방식**으로 적용합니다.
+
+### **Priority 0 — Derived / Mandatory Charts**
+
+| 유형 | 설명 |
+| --- | --- |
+| 세부 지역(region_minor) | 광역 지역(region_major)로 필터링된 경우 자동 생성 |
+| Target Field Charts | 사용자의 질의 의도가 특정 필드를 지목할 때 최우선 노출 |
+
+---
+
+### **Priority 1 — Semantic-Based Charts**
+
+- 질의 키워드와 연관된 **Semantic Fields** 자동 분석
+    - 예: “운동하는 사람”, “여행 자주 가는 사람” → 해당 semantic 필드 우선 노출
+- 차량 관련:
+    - *차량 소유 비율 ≥ 70%**일 때 → 차종 분포 차트 자동 추가
+
+---
+
+### **Priority 2 — Core Demographics**
+
+- 성별(gender), 연령대(age), 지역(region) 등 기본 인구통계 정보
+- 단, **검색 조건에 이미 사용된 필드는 제외**
+    - 예: age=20대로 검색한 경우 → age 차트 생략
+
+---
+
+### **Priority 3 — Crosstab Analysis**
+
+상위 Priority 차트가 5개 미만일 경우 실행.
+
+- Target Field × 주요 demographic(성별, 연령대) 교차 분석
+- 예: "OTT 보는 20대" 검색 시
+    - "OTT 장르 선호 × 성별"
+    - "OTT 시청 시간 × 연령대"
+
+---
+
+### **Priority 4 — High-Ratio Feature Discovery**
+
+데이터 전체를 스캔해 다음 조건을 만족하는 필드를 자동 발굴:
+
+- 특정 응답 비율이 **40% ~ 95% 사이**
+- 한쪽으로 치우쳤지만 완전한 쏠림(95%↑)은 아님
+- 뚜렷한 특징을 가진 필드를 자동 차트화
+
+---
+
+## 🚫 Smart Exclusion Rules
+
+다음 조건에 해당하는 차트는 자동 제외됩니다.
+
+### 1. 검색 필터 중복
+
+- 사용자가 검색 조건(demographic_filters)에 명시한 필드
+    - 예: age, gender, region 등 → 중복 차트 제외
+
+### 2. 논리적 중복
+
+- 서로 높은 상관관계로 인해 의미 없는 차트
+
+| 필터 | 제외되는 차트 | 이유 |
+| --- | --- | --- |
+| children_count 존재 | marital_status 제외 | 기혼 확률 99% |
+| car_model 조건 존재 | car_ownership 제외 | 차종 지정 = 소유 확정 |
+
+### 3. 데이터 쏠림
+
+- 특정 응답 비율이 **95% 이상**
+    
+    → 분석 가치 없음 → 제외
+    
+---
+
+## 📦 Summary
+
+- 우선순위 기반으로 *의미 있는 차트만* 자동 생성
+- 사용자가 이미 설정한 조건은 제외
+- 극단적으로 편향된 값도 제외
+- 의미 있는 패턴, semantic 연관 데이터, 교차 분석은 우선적으로 제공
+
+---
+
 # 🛠️ 기술 스택 (Tech Stack)
 
 ### **Framework**
@@ -219,7 +320,9 @@ API Response
 - NumPy
 - Scikit-learn (Cosine Similarity)
 
-### 🛠️ 실행 방법
+---
+
+## 🛠️ 실행 방법
 
 #### 1. 가상환경 활성화
 .\venv\Scripts\activate
