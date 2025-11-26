@@ -1,5 +1,5 @@
 import logging
-from services.summarizer import generate_stats_summary, generate_demographic_summary
+from app.services.llm_summarizer import generate_stats_summary, generate_demographic_summary
 
 class LLMService:
     """

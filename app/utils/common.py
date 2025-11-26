@@ -1,9 +1,9 @@
 import re
 import logging
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Counter
 from functools import lru_cache
+from app.core.llm_client import get_claude_client
 
-# 분리된 상수 파일에서 데이터 import
 from app.constants.mapping import (
     COMMON_NEGATIVE_PATTERNS,
     SPECIFIC_NEGATIVE_PATTERNS,
@@ -12,11 +12,9 @@ from app.constants.mapping import (
     QPOLL_FIELD_TO_TEXT
 )
 
-# LLM 관련 함수 import (llm.py 파일에서 가져옴)
 try:
-    from llm import extract_relevant_columns_via_llm
+    from app.services.llm_summarizer import extract_relevant_columns_via_llm
 except ImportError:
-    # llm 모듈이 없을 경우를 대비한 가짜 구현 또는 에러 처리
     logging.warning("llm 모듈을 찾을 수 없습니다. 동적 컬럼 탐색이 제한됩니다.")
     def extract_relevant_columns_via_llm(q, c): return []
 
@@ -52,7 +50,7 @@ def get_field_mapping(keyword: str) -> Optional[Dict[str, Any]]:
     }
 
 def find_related_fields(query: str) -> List[str]:
-    
+
     related_fields = set()
     
     # 1. 필드 설명(FIELD_NAME_MAP) 전체 스캔
@@ -112,3 +110,14 @@ def find_target_columns_dynamic(question: str) -> List[str]:
 
     logging.info(f"✅ 매핑 완료: {final_columns}")
     return final_columns
+
+def calculate_distribution(values: List[Any]) -> Dict[str, float]:
+    """리스트 값들의 분포(%)를 계산하여 반환"""
+    if not values:
+        return {}
+    
+    total = len(values)
+    counts = Counter(values)
+    
+    # 소수점 첫째 자리까지 반올림
+    return {k: round((v / total) * 100, 1) for k, v in counts.items()}

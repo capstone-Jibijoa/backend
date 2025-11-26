@@ -1,3 +1,4 @@
+'''
 import boto3
 import os
 import json
@@ -107,3 +108,4 @@ except RuntimeError as e:
     # 비밀 로드 실패 시 애플리케이션 시작을 막습니다.
     print("FATAL: 핵심 비밀 정보 로드 실패. 인프라 설정(IAM/Secrets Manager)을 확인하세요.")
     raise
+    '''

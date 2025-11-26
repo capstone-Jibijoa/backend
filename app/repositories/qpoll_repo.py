@@ -15,7 +15,6 @@ class QpollRepository:
     def get_responses_for_table(self, panel_ids: List[str], qpoll_fields: List[str]) -> Dict[str, Dict[str, str]]:
         """
         테이블 표시용: 특정 패널들의 특정 질문 답변만 조회
-        (기존 main.py의 _get_qpoll_responses_for_table 로직)
         """
         client = get_qdrant_client()
         if not client or not panel_ids or not qpoll_fields:

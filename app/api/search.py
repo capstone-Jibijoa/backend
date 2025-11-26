@@ -11,14 +11,16 @@ async def search_panels(
 ):
     """[Lite 모드] 패널 검색"""
     try:
-        return await service.search_panels(query.query, query.search_mode)
+        return await service.search_panels(query)
     except Exception as e:
+        import logging
+        logging.error(f"Search Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/debug/classify")
 async def debug_classify(query: SearchQuery):
     """검색어 파싱 디버깅용"""
-    from llm import parse_query_intelligent
+    from app.services.llm_prompt import parse_query_intelligent
     try:
         return parse_query_intelligent(query.query)
     except Exception as e:

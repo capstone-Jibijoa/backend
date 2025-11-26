@@ -1,16 +1,15 @@
 import logging
 from langchain_anthropic import ChatAnthropic
 from dotenv import load_dotenv
-from app.core.settings import settings 
+#from app.core.settings import settings 
 
 load_dotenv()
 
 def get_claude_client():
     """Claude 클라이언트 싱글톤 또는 팩토리"""
     try:
-        # API Key는 환경변수 또는 settings에서 로드
         client = ChatAnthropic(
-            model="claude--5-sonnet", # 모델명은 최신 버전에 맞게 조정
+            model="claude-sonnet-4-5",
             temperature=0.1,
             # api_key=settings.ANTHROPIC_API_KEY 
         )

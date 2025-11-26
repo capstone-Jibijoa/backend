@@ -8,11 +8,11 @@ from fastapi_cache.backends.inmemory import InMemoryBackend
 from dotenv import load_dotenv
 from app.database.connection import init_db, cleanup_db
 from app.api.router import api_router
-from search_helpers import initialize_embeddings 
+from app.core.embeddings import initialize_embeddings 
+#from app.core.settings import settings
 
 load_dotenv()
 
-# 로깅 설정 (기존 log_config.json 활용 가정, 필요시 app/core/logging.py로 이동)
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
