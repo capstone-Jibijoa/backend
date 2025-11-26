@@ -28,7 +28,7 @@ def check_database_structure():
         print("\n📋 1. welcome_meta2 테이블 기본 정보:")
         print("-" * 70)
         
-        cur.execute("SELECT COUNT(*) FROM welcome_meta2")
+        cur.execute("SELECT COUNT(*) FROM qpoll_meta")
         total_count = cur.fetchone()[0]
         print(f"총 레코드 수: {total_count:,}개")
         
@@ -39,7 +39,7 @@ def check_database_structure():
         cur.execute("""
             SELECT column_name, data_type, is_nullable
             FROM information_schema.columns
-            WHERE table_name = 'welcome_meta2'
+            WHERE table_name = 'qpoll_meta'
             ORDER BY ordinal_position
         """)
         columns = cur.fetchall()
@@ -55,7 +55,7 @@ def check_database_structure():
         
         cur.execute("""
             SELECT structured_data 
-            FROM welcome_meta2 
+            FROM qpoll_meta
             LIMIT 1
         """)
         sample_data = cur.fetchone()
