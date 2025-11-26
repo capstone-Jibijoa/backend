@@ -26,7 +26,6 @@ class SemanticRouter:
             return
             
         logger.info("🔄 Semantic Router 초기화 중...")
-        # [수정] core/embeddings.py의 함수 사용
         self.embeddings = initialize_embeddings()
         
         # 2. 질문(Field) 리스트업

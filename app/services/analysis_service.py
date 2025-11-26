@@ -9,15 +9,15 @@ from app.repositories.panel_repo import PanelRepository
 from app.repositories.qpoll_repo import QpollRepository
 from app.services.llm_service import LLMService
 from app.core.semantic_router import router  
-from app.utils.text_utils import clean_label, get_age_group
-from app.utils.common import calculate_distribution
+from app.utils.text_utils import clean_label, calculate_distribution, get_age_group, truncate_text
+from app.utils.common import find_target_columns_dynamic, get_field_mapping
 
 # 매핑 규칙 및 상수
 from app.constants.mapping import (
     FIELD_NAME_MAP, 
     QPOLL_FIELD_TO_TEXT, 
     WELCOME_OBJECTIVE_FIELDS,
-    VALUE_TRANSLATION_MAP
+    VALUE_TRANSLATION_MAP,
 )
 
 class AnalysisService:
@@ -51,7 +51,7 @@ class AnalysisService:
         }
 
     async def analyze_search_results(self, query: str, classification: Dict, panel_ids: List[str]) -> Tuple[Dict, str]:
-        """[Pro 모드] 심층 분석 및 차트 생성 (Insights 로직 복원)"""
+        """[Pro 모드] 심층 분석 및 차트 생성 (Insights 로직 완벽 복원)"""
         if not panel_ids:
             return {"main_summary": "검색 결과가 없습니다.", "charts": []}, "검색 결과 없음"
 
@@ -60,7 +60,7 @@ class AnalysisService:
         if not panels_data:
             return {"main_summary": "데이터 없음", "charts": []}, "데이터 없음"
 
-        # [복원] 차트 생성 로직 (Semantic + Crosstab + HighRatio)
+        # 차트 생성 로직 
         charts, used_fields = await self._generate_charts_optimized(query, classification, panels_data)
 
         # 요약 생성
@@ -73,22 +73,20 @@ class AnalysisService:
         }, summary_text
 
     # --------------------------------------------------------------------------
-    # [복원] Insights.py 핵심 로직 이식
+    # [핵심] Insights.py의 지능형 차트 추천 로직 이식
     # --------------------------------------------------------------------------
     async def _generate_charts_optimized(self, query: str, classification: Dict, panels_data: List[Dict]) -> Tuple[List[Dict], List[str]]:
         """
         분석 우선순위:
-        1. Target Field
-        2. Semantic Conditions (의도 분석)
-        3. Demographic Filters
-        4. (부족시) Crosstab Charts (교차 분석)
-        5. (부족시) High Ratio Fields (특이점 분석)
+        1. 타겟 필드 (Target Field)
+        2. 의도 분석 (Semantic Analysis) - 검색어의 숨은 뜻 파악
+        3. 검색 필터 (Demographic Filters)
+        4. 교차 분석 (Crosstab) - 차트 부족 시 자동 생성
+        5. 특이점 발견 (High Ratio) - 쏠림 현상이 있는 데이터 자동 발견
         """
         charts = []
         used_fields = []
         chart_tasks = []
-        
-        # 중복 방지를 위한 Set
         search_used_fields = set()
 
         # (1) Target Field (0순위)
@@ -101,19 +99,18 @@ class AnalysisService:
             used_fields.append(target_field)
 
         # (2) Semantic Conditions (1순위 - 의도 분석)
-        # LLM이 파악한 '의도'를 실제 DB/설문 필드와 매칭
         semantic_conditions = classification.get('semantic_conditions', [])
         for condition in semantic_conditions:
             original_keyword = condition.get('original_keyword')
             if not original_keyword: continue
             
-            # Semantic Router 활용
+            # Semantic Router 활용해 연관 필드 찾기
             field_info = router.find_closest_field(original_keyword)
             if field_info:
                 found_field = field_info['field']
                 if found_field in used_fields: continue
                 
-                logging.info(f"💡 2차 의도 발견: '{original_keyword}' -> '{field_info['description']}' ({found_field})")
+                logging.info(f"💡 [Insight] 2차 의도 발견: '{original_keyword}' -> '{field_info['description']}' ({found_field})")
                 
                 if found_field in QPOLL_FIELD_TO_TEXT:
                     chart_tasks.append({"type": "qpoll", "field": found_field, "priority": 1})
@@ -121,7 +118,7 @@ class AnalysisService:
                     chart_tasks.append({"type": "filter", "field": found_field, "priority": 1})
                 used_fields.append(found_field)
 
-        # (3) Demographic Filters & Keywords
+        # (3) Demographic Filters
         filters = classification.get('demographic_filters', {})
         for key in filters:
             if key not in used_fields and key != 'age_range':
@@ -133,7 +130,7 @@ class AnalysisService:
             chart_tasks.append({"type": "filter", "field": "birth_year", "priority": 2})
             used_fields.append('birth_year')
 
-        # [실행] 차트 생성 (병렬)
+        # [실행] 차트 데이터 생성 (병렬 처리)
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
             for task in chart_tasks:
@@ -153,17 +150,15 @@ class AnalysisService:
 
         # (4) [Fallback] 차트가 부족하면 교차 분석(Crosstab) 추가
         if len(charts) < 5:
-            # 기준 필드 선정 (타겟 필드 or 첫 번째 차트 필드)
             pivot_field = target_field if target_field in used_fields else (used_fields[0] if used_fields else None)
             
             if pivot_field:
                 pivot_name = QPOLL_FIELD_TO_TEXT.get(pivot_field, FIELD_NAME_MAP.get(pivot_field, pivot_field))
-                # 비교할 축 (연령, 성별, 지역, 직업)
                 standard_axes = [('birth_year','연령대'), ('gender','성별'), ('region_major','지역'), ('job_title_raw','직업')]
                 
                 for ax_field, ax_name in standard_axes:
                     if len(charts) >= 5: break
-                    if ax_field == pivot_field or ax_field in search_used_fields: continue # 이미 필터로 쓴건 제외
+                    if ax_field == pivot_field or ax_field in search_used_fields: continue
                     
                     crosstab = self._create_crosstab_chart(panels_data, ax_field, pivot_field, ax_name, pivot_name)
                     if crosstab:
@@ -177,19 +172,16 @@ class AnalysisService:
         return charts, used_fields
 
     def _create_crosstab_chart(self, panels_data, field1, field2, name1, name2) -> Dict:
-        """교차 분석 차트 생성 (예: 연령대별 선호도)"""
-        # 데이터 전처리 및 그룹핑 로직 간소화 구현
-        crosstab = {} # {GroupA: {Val1: 10, Val2: 5}, ...}
+        """교차 분석 차트 생성"""
+        crosstab = {}
         
-        # 1. field1(그룹)의 상위 값 추출
         vals1 = [p.get(field1) for p in panels_data if p.get(field1)]
         if field1 == 'birth_year': vals1 = [get_age_group(v) for v in vals1]
         if not vals1: return {}
         
-        top_groups = [k for k, v in Counter(vals1).most_common(5)] # 상위 5개 그룹만
+        top_groups = [k for k, v in Counter(vals1).most_common(5)]
 
         for group in top_groups:
-            # 해당 그룹에 속하는 패널만 필터링
             group_panels = []
             for p in panels_data:
                 p_val1 = p.get(field1)
@@ -197,7 +189,6 @@ class AnalysisService:
                 if str(p_val1) == str(group):
                     group_panels.append(p)
             
-            # field2(값) 분포 계산
             vals2 = []
             for p in group_panels:
                 v = p.get(field2)
@@ -207,7 +198,6 @@ class AnalysisService:
             
             if vals2:
                 dist = calculate_distribution([clean_label(v) for v in vals2])
-                # 상위 5개만 남기고 정렬
                 crosstab[str(group)] = dict(sorted(dist.items(), key=lambda x: x[1], reverse=True)[:5])
 
         if not crosstab: return {}
@@ -221,7 +211,7 @@ class AnalysisService:
         }
 
     def _find_high_ratio_fields(self, panels_data, exclude_fields, max_charts) -> List[Dict]:
-        """비율이 한쪽으로 쏠린(특이점이 있는) 필드를 자동으로 찾음"""
+        """특이점(High Ratio) 필드 자동 발굴"""
         results = []
         candidates = [f for f in WELCOME_OBJECTIVE_FIELDS if f[0] not in exclude_fields]
         
@@ -241,7 +231,7 @@ class AnalysisService:
             if not dist: continue
             top_k, top_v = sorted(dist.items(), key=lambda x: x[1], reverse=True)[0]
             
-            if 50.0 <= top_v < 95.0:
+            if 50.0 <= top_v < 98.0:
                 results.append({
                     "topic": f"{kname} 특징",
                     "description": f"전체의 {top_v}%가 '{top_k}'입니다.",
