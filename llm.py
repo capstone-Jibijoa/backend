@@ -7,7 +7,7 @@ from functools import lru_cache
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import SystemMessage, HumanMessage
 from dotenv import load_dotenv
-from settings import settings
+#from settings import settings
 
 load_dotenv()
 
@@ -23,11 +23,11 @@ except Exception as e:
 
 # 2. DB 스키마 정보
 DB_SCHEMA_INFO = """
-## PostgreSQL (인구통계): gender, birth_year, region_major, marital_status, education_level, job_title_raw, income_household_monthly, car_ownership, smoking_experience, drinking_experience
-
-## Qdrant (벡터 검색):
-- welcome_subjective_vectors: 주관식 답변 전체
-- qpoll_vectors_v2: 라이프스타일 설문 (ott_count, physical_activity, skincare_spending, ai_chatbot_used, stress_relief_method, travel_planning_style 등 40+ 카테고리)
+## PostgreSQL (인구통계)
+- gender, birth_year, region_major, marital_status, education_level, job_title_raw
+- income_household_monthly: ["월 100만원 미만", "월 100~199만원", "월 200~299만원", "월 300~399만원", "월 400~499만원", "월 500~599만원", "월 600~699만원", "월 700만원 이상"]
+- car_ownership, smoking_experience, drinking_experience
+...
 """
 
 # 3. 시스템 프롬프트 (수정됨: {{QUERY}} 위치 명시 및 JSON 포맷 최적화)
