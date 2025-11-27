@@ -30,7 +30,7 @@ def get_connection_pool():
                         host=settings.DB_HOST,
                         database=settings.DB_NAME,
                         user=settings.DB_USER,
-                        password=settings.DB_USER,
+                        password=settings.DB_PASSWORD,
                         connect_timeout=5,
                         options="-c statement_timeout=30000"
                     )
