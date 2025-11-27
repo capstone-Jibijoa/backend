@@ -38,7 +38,8 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "https://main.dl33xtoyrvsye.amplifyapp.com",
-    "https://jibijoa.cloud"
+    "https://jibijoa.cloud",
+    "https://www.jibijoa.cloud"
 ]
 app.add_middleware(
     CORSMiddleware,
