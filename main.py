@@ -37,7 +37,8 @@ app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
-    "https://main.dl33xtoyrvsye.amplifyapp.com"
+    "https://main.dl33xtoyrvsye.amplifyapp.com",
+    "https://jibijoa.cloud"
 ]
 app.add_middleware(
     CORSMiddleware,
