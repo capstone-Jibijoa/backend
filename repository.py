@@ -1,12 +1,9 @@
-# repository.py
 import logging
 import os
 from typing import List, Dict, Any, Optional, Tuple, Set
 from collections import Counter
 
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, MatchAny, MatchText
-
-# 기존 db.py에서 연결 함수만 가져옵니다
 from db import get_db_connection_context, get_qdrant_client
 from mapping_rules import QPOLL_FIELD_TO_TEXT
 
