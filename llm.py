@@ -24,17 +24,10 @@ except Exception as e:
 # 2. DB 스키마 정보
 DB_SCHEMA_INFO = """
 ## PostgreSQL (인구통계)
-<<<<<<< HEAD
-- gender, birth_year, region_major, marital_status, education_level, job_title_raw
-- income_household_monthly: ["월 100만원 미만", "월 100~199만원", "월 200~299만원", "월 300~399만원", "월 400~499만원", "월 500~599만원", "월 600~699만원", "월 700만원 이상"]
-- car_ownership, smoking_experience, drinking_experience
-...
-=======
 - gender, birth_year, region_major, marital_status, education_level
 - job_title_raw (e.g. 학생, 주부, 회사원), job_duty_raw (e.g. 전문직, 사무직, 기술직)
 - income_personal_monthly: ["월 100만원 미만", "월 100~199만원", "월 200~299만원", "월 300~399만원", "월 400~499만원", "월 500~599만원", "월 600~699만원", "월 700만원 이상"]
 - car_ownership, smoking_experience, drinking_experience
->>>>>>> c40975d1938632a6445b03eacf1662d26956dcd5
 """
 
 # 3. 시스템 프롬프트 
