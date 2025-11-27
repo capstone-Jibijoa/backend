@@ -5,8 +5,11 @@ import datetime
 
 from mapping_rules import WELCOME_OBJECTIVE_FIELDS, QPOLL_FIELDS, FIELD_NAME_MAP
 
-def calculate_age_from_birth_year(birth_year, current_year: int = 2025) -> int:
-    """출생연도로부터 나이 계산"""
+def calculate_age_from_birth_year(birth_year, current_year: int = None) -> int:
+    """출생연도로부터 나이 계산 (현재 연도 동적 적용)"""
+    if current_year is None:
+        current_year = datetime.datetime.now().year
+        
     try:
         return current_year - int(birth_year)
     except:
