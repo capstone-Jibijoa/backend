@@ -2,33 +2,35 @@ import os
 import logging
 import re 
 import pandas as pd
-from llm import generate_stats_summary, generate_demographic_summary
 from typing import List, Dict, Any, Tuple
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 import numpy as np
 from sklearn.cluster import DBSCAN
+
+# --- LLM 관련 ---
+from llm import generate_stats_summary, generate_demographic_summary
+
+# --- Repository & Helpers ---
+from repository import PanelRepository, VectorRepository 
 from search_helpers import initialize_embeddings 
 from utils import (
-    extract_field_values,
     calculate_distribution,
     find_top_category,
     WELCOME_OBJECTIVE_FIELDS,
-    get_panels_data_from_db,
     get_age_group
 )
+
+# --- Mappings & Rules ---
 from mapping_rules import (
     get_field_mapping, 
     QPOLL_FIELD_TO_TEXT, 
     QPOLL_ANSWER_TEMPLATES, 
-    KEYWORD_MAPPINGS,
     VALUE_TRANSLATION_MAP, 
     find_target_columns_dynamic,
     FIELD_NAME_MAP,
-    QPOLL_FIELD_TO_TEXT
+    FIELD_ALIAS_MAP
 )
-from db import get_db_connection_context, get_qdrant_client
 from semantic_router import router 
 
 def _clean_label(text: Any, max_length: int = 25) -> str:
@@ -85,89 +87,66 @@ def _sort_distribution(distribution: Dict[str, float]) -> Dict[str, float]:
     return dict(sorted(distribution.items(), key=lambda x: x[1], reverse=True))
 
 def get_field_distribution_from_db(field_name: str, limit: int = 50) -> Dict[str, float]:
-    """PostgreSQL 직접 집계"""
-    try:
-        with get_db_connection_context() as conn:
-            if not conn: return {}
-            cur = conn.cursor()
-            
-            if field_name == "birth_year":
-                query = f"""
-                    WITH age_groups AS (
-                        SELECT 
-                            CASE 
-                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 20 THEN '10대'
-                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 30 THEN '20대'
-                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 40 THEN '30대'
-                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 50 THEN '40대'
-                                WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 60 THEN '50대'
-                                ELSE '60대 이상'
-                            END as age_group
-                        FROM welcome_meta2
-                        WHERE structured_data->>'birth_year' IS NOT NULL
-                    )
-                    SELECT age_group, COUNT(*), ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)
-                    FROM age_groups GROUP BY age_group ORDER BY 3 DESC LIMIT {limit}
-                """
-            elif field_name == "children_count":
-                query = f"""
-                    SELECT 
-                        CONCAT((structured_data->>'{field_name}')::numeric::int, '명') as val, 
-                        COUNT(*) as count,
-                        ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as percentage
-                    FROM welcome_meta2
-                    WHERE structured_data->>'{field_name}' IS NOT NULL
-                    GROUP BY val ORDER BY percentage DESC LIMIT {limit}
-                """
-            else:
-                query = f"""
-                    SELECT structured_data->>'{field_name}', COUNT(*), ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)
-                    FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL
-                    GROUP BY 1 ORDER BY 3 DESC LIMIT {limit}
-                """
-            
-            cur.execute(query)
-            rows = cur.fetchall()
-            cur.close()
-            return {row[0]: float(row[2]) for row in rows if row[0]}
-            
-    except Exception as e:
-        logging.error(f"DB 집계 실패 ({field_name}): {e}")
-        return {}
+    """PostgreSQL 집계 (Repository 위임)"""
+    
+    if field_name == "birth_year":
+        query = f"""
+            WITH age_groups AS (
+                SELECT 
+                    CASE 
+                        WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 20 THEN '10대'
+                        WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 30 THEN '20대'
+                        WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 40 THEN '30대'
+                        WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 50 THEN '40대'
+                        WHEN (date_part('year', CURRENT_DATE) - (structured_data->>'birth_year')::int) < 60 THEN '50대'
+                        ELSE '60대 이상'
+                    END as age_group
+                FROM welcome_meta2
+                WHERE structured_data->>'birth_year' IS NOT NULL
+            )
+            SELECT age_group, COUNT(*), ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)
+            FROM age_groups GROUP BY age_group ORDER BY 3 DESC LIMIT {limit}
+        """
+    elif field_name == "children_count":
+        query = f"""
+            SELECT 
+                CONCAT((structured_data->>'{field_name}')::numeric::int, '명') as val, 
+                COUNT(*) as count,
+                ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) as percentage
+            FROM welcome_meta2
+            WHERE structured_data->>'{field_name}' IS NOT NULL
+            GROUP BY val ORDER BY percentage DESC LIMIT {limit}
+        """
+    else:
+        query = f"""
+            SELECT structured_data->>'{field_name}', COUNT(*), ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)
+            FROM welcome_meta2 WHERE structured_data->>'{field_name}' IS NOT NULL
+            GROUP BY 1 ORDER BY 3 DESC LIMIT {limit}
+        """
+    
+    return PanelRepository.aggregate_field(query)
     
 def get_qpoll_distribution_from_db(qpoll_field: str, limit: int = 50) -> Dict[str, float]:
-    """Qdrant 집계"""
+    """Qdrant 집계 (Repository 위임)"""
     question_text = QPOLL_FIELD_TO_TEXT.get(qpoll_field)
     if not question_text: return {}
-    client = get_qdrant_client()
-    if not client: return {}
-    try:
-        COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_QPOLL_NAME", "qpoll_vectors_v2")
-        query_filter = Filter(must=[FieldCondition(key="question", match=MatchValue(value=question_text))])
-        all_points = []
-        next_offset = None
-        while True:
-            points, next_offset = client.scroll(
-                collection_name=COLLECTION_NAME, scroll_filter=query_filter, limit=1000, offset=next_offset, with_payload=True, with_vectors=False
-            )
-            all_points.extend(points)
-            if next_offset is None: break
-        
-        if not all_points: return {}
-        extracted_values = []
-        for p in all_points:
-            if p.payload and p.payload.get("sentence"):
-                raw_sentence = p.payload.get("sentence")
-                core_val = _extract_core_value(qpoll_field, raw_sentence)
-                if core_val: extracted_values.append(core_val)
-        
-        if not extracted_values: return {}
-        val_counts = Counter(extracted_values)
-        total = len(extracted_values)
-        return {k: round((v / total) * 100, 1) for k, v in val_counts.most_common(limit)}
-    except Exception as e:
-        logging.error(f"Q-Poll 집계 실패: {e}")
-        return {}
+    
+    all_points = VectorRepository.fetch_qpoll_by_question(question_text)
+    
+    if not all_points: return {}
+    extracted_values = []
+    
+    for p in all_points:
+        if p.payload and p.payload.get("sentence"):
+            raw_sentence = p.payload.get("sentence")
+            core_val = _extract_core_value(qpoll_field, raw_sentence)
+            if core_val: extracted_values.append(core_val)
+    
+    if not extracted_values: return {}
+    
+    val_counts = Counter(extracted_values)
+    total = len(extracted_values)
+    return {k: round((v / total) * 100, 1) for k, v in val_counts.most_common(limit)}
 
 def create_chart_data_optimized(
     keyword: str,
@@ -274,8 +253,7 @@ def calculate_column_stats(df: pd.DataFrame, columns: List[str]) -> str:
             if total_count == 0:
                 continue
 
-            # 리스트형 데이터 처리 (예: ['A', 'B'] -> 'A', 'B'로 분리하여 카운트)
-            # 데이터가 리스트인지 확인
+            # 리스트형 데이터 처리
             if valid_series.apply(lambda x: isinstance(x, list)).any():
                 exploded = valid_series.explode()
                 counts = exploded.value_counts().head(5)
@@ -296,33 +274,27 @@ def calculate_column_stats(df: pd.DataFrame, columns: List[str]) -> str:
 
 async def get_ai_summary(panel_ids: List[str], question: str):
     """
-    1. DB에서 데이터 로드
+    1. Repository에서 데이터 로드
     2. 동적 매핑 (질문 -> 컬럼)
     3. 통계 계산 (Python)
     4. LLM 요약 생성
     """
-    # 1. 데이터 로드 (최대 1000명 샘플링하여 속도 확보)
     target_ids = panel_ids[:1000]
-    panels_data = get_panels_data_from_db(target_ids)
+    
+    panels_data = PanelRepository.fetch_panels_data(target_ids)
     
     if not panels_data:
         return {"summary": "분석할 데이터가 없습니다.", "used_fields": []}
 
-    # DataFrame 변환
     df = pd.DataFrame(panels_data)
-
-    # 2. 관련 컬럼 찾기 (동적 매핑)
     target_columns = find_target_columns_dynamic(question)
     
-    # 3. 통계 텍스트 생성 (Python Aggregation)
     if not target_columns:
-        # 컬럼을 못 찾은 경우 기본 인구통계 요약 시도
         stats_context = calculate_column_stats(df, ['gender', 'birth_year', 'region_major'])
         target_columns = ['기본 인구통계']
     else:
         stats_context = calculate_column_stats(df, target_columns)
 
-    # 4. LLM 요약 생성
     summary_text = generate_stats_summary(question, stats_context)
 
     return {
@@ -337,52 +309,39 @@ async def get_search_result_overview(query: str, panel_ids: List[str], classific
     if not panel_ids:
         return "검색된 패널이 없습니다."
 
-    # 1. 속도를 위해 상위 1000명만 샘플링하여 통계 계산
     sample_ids = panel_ids[:1000]
-    panels_data = get_panels_data_from_db(sample_ids)
+    
+    panels_data = PanelRepository.fetch_panels_data(sample_ids)
     
     if not panels_data:
         return "데이터를 불러올 수 없습니다."
 
-    # DataFrame 변환
     df = pd.DataFrame(panels_data)
     
-    stats_context = [] # LLM에게 줄 텍스트 리스트
-    print(f"DEBUG: 타겟 필드 = {classification.get('target_field')}")
-
-    # 1. 타겟 필드 통계 (예: 차종) - Top 3 분석 추가
+    stats_context = [] 
+    
+    # 1. 타겟 필드 통계
     target_field = classification.get('target_field')
     if target_field and target_field in df.columns:
-        # 상위 3개 추출
         counts = df[target_field].value_counts(normalize=True).head(3)
         if not counts.empty:
             korean_name = FIELD_NAME_MAP.get(target_field, target_field)
-            
-            # 통계 텍스트 생성 (예: [차종] 1위 아반떼(9%), 2위 K5(8%))
             items_str = []
             for val, ratio in counts.items():
                 items_str.append(f"{val}({ratio*100:.1f}%)")
-            
             distribution_desc = ", ".join(items_str)
             stats_context.append(f"[{korean_name} 분포]: {distribution_desc}")
 
-    # 2. 인구통계 (성별, 연령, 지역) - 주요 특징만
+    # 2. 인구통계 (성별, 연령, 지역)
     demos = ['gender', 'region_major']
     if 'birth_year' in df.columns:
-        # 나이 변환 로직
         df['age_group'] = df['birth_year'].apply(lambda x: get_age_group(x) if x else None)
-        
-        # 🔍 [디버깅] 실제 데이터가 어떻게 들어있는지 콘솔에 출력
         age_counts = df['age_group'].value_counts(normalize=True)
-        print(f"🔍 [DEBUG] 실제 연령 분포 (상위 5개):\n{age_counts.head(5)}")
-        
-        # 상위 3개까지 통계 텍스트에 포함 (1위만 주면 편향됨)
         top_ages = age_counts.head(3)
         if not top_ages.empty:
             age_desc = []
             for age, ratio in top_ages.items():
                 age_desc.append(f"{age}({ratio*100:.1f}%)")
-            
             stats_context.append(f"[연령대 분포]: {', '.join(age_desc)}")
 
     for col in demos:
@@ -390,26 +349,18 @@ async def get_search_result_overview(query: str, panel_ids: List[str], classific
             top = df[col].value_counts(normalize=True).head(1)
             if not top.empty:
                 val, ratio = top.index[0], top.values[0]
-                # 50% 이상인 경우만 "과반수" 키워드 활용을 위해 강조
                 feature = f"{val} ({ratio*100:.1f}%)"
                 if ratio >= 0.5: feature += " - 과반수 이상"
-                
                 col_name = FIELD_NAME_MAP.get(col, col)
                 stats_context.append(f"[{col_name}]: {feature}")
 
-    # 3. 소득 수준이나 직업이 뚜렷하면 추가 (특징 발견 로직)
+    # 3. 소득 수준
     if 'income_personal_monthly' in df.columns:
         top_income = df['income_personal_monthly'].value_counts(normalize=True).head(1)
-        if not top_income.empty and top_income.values[0] > 0.3: # 30% 이상 쏠림이 있을 때만
+        if not top_income.empty and top_income.values[0] > 0.3:
              stats_context.append(f"[주요 소득구간]: {top_income.index[0]} ({top_income.values[0]*100:.1f}%)")
 
-    # 통계 리스트를 줄바꿈 문자로 합침
     full_stats_text = "\n".join(stats_context)
-
-    full_stats_text = "\n".join(stats_context)
-    print(f"DEBUG: LLM에게 보낼 통계 텍스트:\n{full_stats_text}")  
-
-    # 4. LLM 호출 (이제 stats 딕셔너리가 아니라 텍스트 통본을 넘김)
     summary = generate_demographic_summary(query, full_stats_text, len(panel_ids))
     
     return summary
@@ -473,7 +424,7 @@ def create_crosstab_chart(
     if not crosstab_data:
         return {}
 
-    # [Case 1] 단일 그룹 -> Pie Chart
+    # Pie Chart
     if len(crosstab_data) <= 1:
         only_group = list(crosstab_data.keys())[0]
         distribution = calculate_distribution(crosstab_data[only_group])
@@ -487,7 +438,7 @@ def create_crosstab_chart(
             "fields": [field1, field2]
         }
 
-    # [Case 2] 다중 그룹 -> Bar Chart
+    # Bar Chart
     chart_values = {}
     sorted_groups = sorted(crosstab_data.keys(), key=lambda k: len(crosstab_data[k]), reverse=True)
     target_groups = sorted_groups[:max_categories]
@@ -541,7 +492,6 @@ def _analyze_fields_in_parallel(panels_data: List[Dict], candidate_fields: List[
         except: pass
     return results
 
-
 def find_high_ratio_fields_optimized(
     panels_data: List[Dict], 
     exclude_fields: List[str], 
@@ -589,8 +539,59 @@ def analyze_search_results_optimized(
         return {"main_summary": "검색 결과가 없습니다.", "charts": []}, 200
     
     try:
-        panels_data = get_panels_data_from_db(panel_id_list)
+        panels_data = PanelRepository.fetch_panels_data(panel_id_list)
+
         if not panels_data: return {"main_summary": "데이터 없음", "charts": []}, 200
+        fixed_filters = set()
+        
+        # 1. Demographic Filters 확인
+        demographic_filters = classified_keywords.get('demographic_filters', {})
+        if demographic_filters:
+            for k, v in demographic_filters.items():
+                if not isinstance(v, list) or len(v) == 1:
+                    fixed_filters.add(k)
+                    mapped_field = FIELD_ALIAS_MAP.get(k)
+                    if mapped_field: fixed_filters.add(mapped_field)
+
+        # 2. Structured Filters 확인
+        structured_filters = classified_keywords.get('structured_filters', [])
+        for f in structured_filters:
+            if f.get('operator') in ['eq', 'like', 'ilike']: 
+                 if f.get('field'): fixed_filters.add(f['field'])
+    
+        target_field = classified_keywords.get('target_field')
+        
+        if target_field:
+            if target_field == 'job_duty_raw':
+                logging.info(f"   🔄 대체 필드 적용: job_duty_raw -> job_title_raw")
+                target_field = 'job_title_raw'
+                classified_keywords['target_field'] = target_field
+            elif target_field == 'region_major':
+                logging.info(f"   🔄 대체 필드 적용: region_major -> region_minor")
+                target_field = 'region_minor'
+                classified_keywords['target_field'] = target_field
+            elif target_field in ['income_personal_monthly', 'income_household_monthly']:
+                logging.info(f"   🔄 대체 필드 적용: {target_field} -> happiest_self_spending")
+                target_field = 'happiest_self_spending' 
+                classified_keywords['target_field'] = target_field
+            elif target_field == 'car_ownership':
+                logging.info(f"   🔄 대체 필드 적용: car_ownership -> car_model_raw")
+                target_field = 'car_model_raw'
+                classified_keywords['target_field'] = target_field
+            elif target_field == 'phone_brand_raw':
+                logging.info(f"   🔄 대체 필드 적용: phone_brand_raw -> phone_model_raw")
+                target_field = 'phone_model_raw'
+                classified_keywords['target_field'] = target_field
+            elif target_field == 'marital_status':
+                logging.info(f"   🔄 대체 필드 적용: marital_status -> children_count")
+                target_field = 'children_count'
+                classified_keywords['target_field'] = target_field
+            else:
+                if target_field in fixed_filters:
+                    logging.info(f"   🚫 '{target_field}'에 대한 대체 필드 없음 -> 타겟 해제하여 100% 차트 방지")
+                    target_field = None 
+                    classified_keywords['target_field'] = None
+
         
         raw_keywords = classified_keywords.get('ranked_keywords_raw', [])
         ranked_keywords = []
@@ -607,7 +608,6 @@ def analyze_search_results_optimized(
             for key in demographic_filters: 
                 if key != 'age_range': search_used_fields.add(key)
 
-        # 자녀 유무 필터가 있으면 '결혼 여부'는 분석에서 제외
         if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
             used_fields.append('marital_status')
 
@@ -638,7 +638,6 @@ def analyze_search_results_optimized(
                     search_used_fields.add(mapping["field"])
 
         # 1. Main Target Field (0순위)
-        target_field = classified_keywords.get('target_field')
         if target_field and target_field != 'unknown' and target_field not in used_fields:
             if target_field in QPOLL_FIELD_TO_TEXT:
                 chart_tasks.append({"type": "qpoll", "kw_info": {"field": target_field, "description": QPOLL_FIELD_TO_TEXT[target_field], "priority": 0}})
@@ -647,7 +646,7 @@ def analyze_search_results_optimized(
                 chart_tasks.append({"type": "filter", "kw_info": {"field": target_field, "description": FIELD_NAME_MAP.get(target_field, target_field), "priority": 0}})
                 used_fields.append(target_field)
 
-        # Q-Poll 타겟인 경우 기본 인구통계(성별, 연령, 지역) 자동 추가
+        # Q-Poll 타겟인 경우 기본 인구통계 자동 추가
         if target_field and target_field in QPOLL_FIELD_TO_TEXT:
             basic_demos = [('gender', '성별'), ('birth_year', '연령대'), ('region_major', '거주 지역')]
             for field, label in basic_demos:
@@ -658,7 +657,7 @@ def analyze_search_results_optimized(
                     })
                     used_fields.append(field)
 
-        # 2. Semantic Conditions (1순위)
+        # 2. Semantic Conditions
         semantic_conditions = classified_keywords.get('semantic_conditions', [])
         for condition in semantic_conditions:
             original_keyword = condition.get('original_keyword')
@@ -669,6 +668,9 @@ def analyze_search_results_optimized(
                 found_field = field_info['field']
                 if found_field in used_fields: continue
                 
+                if found_field in fixed_filters:
+                     continue
+
                 logging.info(f"   💡 2차 의도 발견: '{original_keyword}' -> '{field_info['description']}' ({found_field})")
                 
                 if found_field in QPOLL_FIELD_TO_TEXT:
@@ -684,6 +686,10 @@ def analyze_search_results_optimized(
             field = kw_info.get('field', '')
             if field in used_fields: continue
             
+            if field in fixed_filters:
+                logging.info(f"🚫 키워드 차트 제외: '{field}'는 이미 필터로 고정됨")
+                continue
+
             if kw_info.get('type') == 'qpoll':
                 kw_info['priority'] = 2
                 chart_tasks.append({"type": "qpoll", "kw_info": kw_info})
@@ -705,28 +711,27 @@ def analyze_search_results_optimized(
                     if (isinstance(val, list) and any(str(v).startswith('1') for v in val) or str(val).startswith('1')): is_single_household = True
         if is_single_household: used_fields.append('income_household_monthly')
 
-        # 차량 소유 비율 70% 이상 시 '소유 여부' 대신 '차종' 차트 노출 (정규화 적용)
+        # 차량 소유 비율 70% 이상 시 차종 차트 추가
         car_ownership_values = [p.get('car_ownership') for p in panels_data if p.get('car_ownership')]
         if car_ownership_values:
             flat_values = []
-            car_map = VALUE_TRANSLATION_MAP.get('car_ownership', {}) # 매핑 정보 로드
+            car_map = VALUE_TRANSLATION_MAP.get('car_ownership', {}) 
             
             for v in car_ownership_values:
                 if isinstance(v, list):
                     for sub_v in v:
                         cleaned = _clean_label(sub_v)
-                        normalized = car_map.get(cleaned, cleaned) # 값 정규화
+                        normalized = car_map.get(cleaned, cleaned)
                         flat_values.append(normalized)
                 else:
                     cleaned = _clean_label(v)
-                    normalized = car_map.get(cleaned, cleaned) # 값 정규화
+                    normalized = car_map.get(cleaned, cleaned)
                     flat_values.append(normalized)
             
             car_dist = calculate_distribution(flat_values)
-            # '있음' 비율 70% 이상이면
             if car_dist.get('있음', 0) >= 70.0:
                 if 'car_model_raw' not in used_fields:
-                    logging.info("🚗 차량 보유 비율 70% 이상 -> 차종(car_model_raw) 분석 자동 추가 (소유 여부 차트 대체)")
+                    logging.info("🚗 차량 보유 비율 70% 이상 -> 차종(car_model_raw) 분석 자동 추가")
                     chart_tasks.append({
                         "type": "filter",
                         "kw_info": {
@@ -737,7 +742,6 @@ def analyze_search_results_optimized(
                     })
                     used_fields.append("car_model_raw")
                 
-                # 차량 소유 여부 차트 억제
                 if 'car_ownership' not in used_fields:
                     used_fields.append("car_ownership")
 
@@ -807,7 +811,8 @@ def analyze_search_results_optimized(
 async def generate_dynamic_insight(panel_ids: List[str], target_field: str, field_desc: str) -> Dict:
     if not panel_ids or not target_field: return {}
     logging.info(f"📊 동적 인사이트 생성 중... (Field: {target_field})")
-    panels_data = get_panels_data_from_db(panel_ids)
+    
+    panels_data = PanelRepository.fetch_panels_data(panel_ids)
     
     cleaned_answers = []
     for p in panels_data:

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from threading import Lock
 from contextlib import contextmanager
-
+from typing import List, Dict, Any, Tuple, Optional
 
 load_dotenv()
 
@@ -176,3 +176,43 @@ def cleanup_db():
     """애플리케이션 종료 시 Connection Pool을 정리합니다."""
     logging.info("DB 리소스 정리 중...")
     close_connection_pool()
+
+def get_panels_data_from_db(panel_id_list: List[str]) -> List[Dict]:
+    """
+    panel_id 리스트로부터 패널 데이터 조회 (Connection Pool 사용)
+    """
+    if not panel_id_list:
+        return []
+    
+    panels_data = []
+    try:
+        with get_db_connection_context() as conn:
+            if not conn:
+                return []
+            cur = conn.cursor()
+
+            cur.execute(
+                """
+                WITH id_order (panel_id, ordering) AS (
+                    SELECT * FROM unnest(%s::text[], %s::int[])
+                )
+                SELECT t.panel_id, t.structured_data
+                FROM welcome_meta2 t
+                JOIN id_order o ON t.panel_id = o.panel_id
+                ORDER BY o.ordering;
+                """,
+                (panel_id_list, list(range(len(panel_id_list))))
+            )
+            rows = cur.fetchall()
+            
+            for panel_id, structured_data in rows:
+                if isinstance(structured_data, dict):
+                    panel = {'panel_id': panel_id}
+                    panel.update(structured_data)
+                    panels_data.append(panel)
+            
+            cur.close()
+        return panels_data
+    except Exception as e:
+        logging.error(f"패널 데이터 조회 실패: {e}", exc_info=True)
+        return []
