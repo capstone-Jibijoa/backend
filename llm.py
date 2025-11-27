@@ -23,14 +23,14 @@ except Exception as e:
 
 # 2. DB 스키마 정보
 DB_SCHEMA_INFO = """
-## PostgreSQL (인구통계): gender, birth_year, region_major, marital_status, education_level, job_title_raw, income_household_monthly, car_ownership, smoking_experience, drinking_experience
-
-## Qdrant (벡터 검색):
-- welcome_subjective_vectors: 주관식 답변 전체
-- qpoll_vectors_v2: 라이프스타일 설문 (ott_count, physical_activity, skincare_spending, ai_chatbot_used, stress_relief_method, travel_planning_style 등 40+ 카테고리)
+## PostgreSQL (인구통계)
+- gender, birth_year, region_major, marital_status, education_level
+- job_title_raw (e.g. 학생, 주부, 회사원), job_duty_raw (e.g. 전문직, 사무직, 기술직)
+- income_personal_monthly: ["월 100만원 미만", "월 100~199만원", "월 200~299만원", "월 300~399만원", "월 400~499만원", "월 500~599만원", "월 600~699만원", "월 700만원 이상"]
+- car_ownership, smoking_experience, drinking_experience
 """
 
-# 3. 시스템 프롬프트 (수정됨: {{QUERY}} 위치 명시 및 JSON 포맷 최적화)
+# 3. 시스템 프롬프트 
 SYSTEM_PROMPT_V2 = """
 You are a Search Query Analyzer. Parse the query into "Demographic Filters (SQL)" and "Semantic Conditions (Vector)".
 
@@ -46,6 +46,9 @@ Extract ONLY explicit matches for these fields:
 - **Social**: `marital_status`, `family_size`, `children_count`.
 - **Status**: `job`, `education_level`, `income_personal`, `income_household`.
 - **Asset**: `car_ownership` (Only 'have car' or 'no car').
+**[IMPORTANT RULE for INCOME]**
+- If the query mentions **"earning", "salary", "making money" (e.g., 돈을 많이 버는, 연봉, 월급)** combined with a **Job/Profession**, map it to **`income_personal_monthly`**.
+- Map to `income_household_monthly` ONLY when "household", "family income", or "house" (e.g., 가구 소득, 집안 형편) is explicitly mentioned.
 *Note: Do NOT infer missing data. Exclude smoking/drinking/appliances here.*
 
 ### 2. Semantic Conditions (Vector Search)
@@ -267,26 +270,29 @@ def generate_demographic_summary(query: str, stats_text: str, total_count: int) 
     if not CLAUDE_CLIENT: return ""
 
     system_prompt = """
-    당신은 날카로운 데이터 분석가입니다. 검색된 패널 그룹의 [통계 데이터]를 보고 사용자의 [질문]에 대한 **핵심 인사이트**를 요약해 주세요.
-
-    [작성 가이드라인]
-    1. **단순 나열 금지**: "A는 몇 프로, B는 몇 프로입니다" 같은 기계적인 나열을 피하세요.
-    2. **관계 및 비교 서술**:
-       - 1위와 2위 차이가 크면 "압도적인 1위", "독주 체제" 등의 표현을 쓰세요.
-       - 차이가 작으면 "치열한 접전", "취향이 분산됨" 등의 표현을 쓰세요.
-       - "20대 남성이라 그런지 ~한 경향이 보입니다" 처럼 인구통계와 결과를 연결하면 더 좋습니다.
-    3. **어조**: 전문적이면서도 이해하기 쉬운 한국어 경어체(~습니다)를 사용하세요.
-    4. **길이**: 2~3문장으로 자연스럽게 이어지도록 작성하세요.
+    당신은 데이터 인사이트 전문가입니다. 
+    제공된 [데이터 통계]를 근거로 [사용자 질문]에 대한 핵심 요약을 작성하세요.
+    
+    [작성 원칙]
+    1. 막연한 표현 대신 **제공된 수치(명, %)**를 반드시 인용하여 근거를 제시하세요. 
+    2. 가장 두드러진 특징(최댓값, 과반수 등)을 강조하세요.
+    3. 질문과 관련 없는 통계는 언급하지 마세요.
+    4. "~하는 것이 특징입니다"와 같은 분석적인 어조를 사용하세요.
+    6. 마케팅을 위한 인사이트를 추가로 제안하세요.
+    5. 한국어로 간결하게 답변하세요 (5문장 내외).
     """
-
+    
     user_prompt = f"""
-    [사용자 검색어]: {query}
-    [분석 대상 인원]: {total_count}명
-    
-    [통계 데이터]:
+    [사용자 질문]
+    {query}
+
+    [분석 대상]
+    총 {total_count}명의 패널
+
+    [통계 데이터]
     {stats_text}
-    
-    위 데이터를 바탕으로 분석 요약을 작성해줘.
+
+    위 데이터를 바탕으로 핵심 분석 요약 마케팅 인사이트를 작성해주세요.
     """
 
     try:

@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchAny, SearchParams
 from langchain_huggingface import HuggingFaceEmbeddings
-
+from repository import PanelRepository
 from db import get_db_connection_context
 from mapping_rules import (
     CATEGORY_MAPPING, 
@@ -223,37 +223,18 @@ def search_welcome_objective(
     attempt_name: str = "구조화"
 ) -> Tuple[Set[str], Set[str]]:
     if not filters:
-        logging.info(f"   Welcome {attempt_name}: 필터 없음")
         return set(), set()
 
-    try:
-        with get_db_connection_context() as conn:
-            if not conn:
-                return set(), set()
+    # SQL문 생성 (Logic)
+    where_clause, params = build_sql_from_structured_filters(filters)
 
-            cur = conn.cursor()
-            where_clause, params = build_sql_from_structured_filters(filters)
-
-            if not where_clause:
-                return set(), set()
-
-            query = f"SELECT panel_id FROM welcome_meta2 {where_clause}"
-            
-            logging.info(f"  (SQL) 실행: {query}")
-            logging.info(f"  (SQL) 파라미터: {params}")
-
-            cur.execute(query, tuple(params))
-            
-            results = {str(row[0]) for row in cur.fetchall()}
-            cur.close()
-
-            logging.info(f"  (SQL) 📈 1단계 필터링 결과: {len(results)}명")
-
-        return results, set()
-
-    except Exception as e:
-        logging.error(f"   Welcome {attempt_name} 검색 실패: {e}", exc_info=True)
+    if not where_clause:
         return set(), set()
+
+    # 실행 (Repository)
+    results = PanelRepository.search_panel_ids_by_sql(where_clause, params)
+    
+    return results, set()
 
 def search_preference_conditions(
     preference_keywords: List[str],

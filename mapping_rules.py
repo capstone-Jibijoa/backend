@@ -92,16 +92,21 @@ CATEGORY_MAPPING = {
     'jobless': ['무직'],
     'unemployed': ['무직'],
 
+    '돈을 많이 버는': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     '고소득': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     'high': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     'high income': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     'rich': ['월 500~599만원', '월 600~699만원', '월 700만원 이상'],
     
+    '돈을 적게 버는': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
     '저소득': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
     'low': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
     'low income': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
+    'poor': ['월 100~199만원', '월 200~299만원', '월 100만원 미만'],
+    
     
     '중산층': ['월 300~399만원', '월 400~499만원'],
+    '중위 소득': ['월 300~399만원', '월 400~499만원'],
     'middle': ['월 300~399만원', '월 400~499만원'],
     'middle class': ['월 300~399만원', '월 400~499만원'],
 
@@ -152,7 +157,8 @@ CATEGORY_MAPPING = {
 FIELD_ALIAS_MAP = {
     "household_size": "family_size",  
     "age": "birth_year",              
-    "job": "job_title_raw",           
+    "job": "job_title_raw",  
+    "job_duty": "job_duty_raw",         
     "region": "region_major",  
     "income_personal": "income_personal_monthly",   
     "income_household": "income_household_monthly"         
@@ -319,7 +325,7 @@ KEYWORD_MAPPINGS: List[Tuple[Union[re.Pattern, str], Dict[str, str]]] = [
     # --- 소득 ---
     (re.compile(r'(월|월소득)\s*(\d+(?:만)?\s*~\s*)?(\d+)\s*만?원?(\s*이상|\s*이하)?'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
     (re.compile(r'(연봉|연 소득)\s*(\d+(?:만)?\s*~\s*)?(\d+)\s*만?원?(\s*이상|\s*이하)?'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
-    (re.compile(r'월소득|월\s*소득|개인소득|본인\s*소득|고소득|저소득|중산층'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}),
+    (re.compile(r'월소득|월\s*소득|개인소득|본인\s*소득|고소득|저소득|중산층|돈을\s*많이\s*버는|돈을\s*적게\s*버는|부자|서민|상위\s*소득|중위\s*소득|고액\s*연봉'), {"field": "income_personal_monthly", "description": "월소득(개인)", "type": "filter"}), # 키워드 추가됨
     (re.compile(r'가구소득|가족\s*소득|가정\s*소득'), {"field": "income_household_monthly", "description": "월소득(가구)", "type": "filter"}),
 
     # --- 휴대폰 ---
