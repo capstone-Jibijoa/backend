@@ -56,14 +56,25 @@ def calculate_age_from_birth_year(birth_year: Any, current_year: int = None) -> 
         return 0
     
 def extract_birth_year_from_raw(age_raw: str) -> int:
-    """ '1971년...' 또는 '1971' 등에서 연도 추출 """
+    """'1971년...', '19711225', '1971' 등에서 연도만 추출"""
     if not age_raw: return 0
-    if isinstance(age_raw, int): return age_raw
-    if str(age_raw).isdigit(): return int(age_raw)
+    if isinstance(age_raw, int): 
+        # 4자리 정수면 그대로, 아니면 앞 4자리만
+        return age_raw if age_raw < 10000 else int(str(age_raw)[:4])
+    
+    age_str = str(age_raw).strip()
+    
+    # ✅ 8자리 이상 숫자 (예: 19961225, 1996042529)
+    if age_str.isdigit() and len(age_str) >= 4:
+        return int(age_str[:4])
+    
     try:
-        match = re.search(r'(\d{4})년?', str(age_raw))
+        # 연도 패턴 매칭 (예: "1971년 03월 07일")
+        match = re.search(r'(\d{4})년?', age_str)
         if match: return int(match.group(1))
-        cleaned = str(age_raw).strip()[:4]
+        
+        # 첫 4자리가 숫자면 추출
+        cleaned = age_str[:4]
         if cleaned.isdigit(): return int(cleaned)
     except ValueError:
         pass
@@ -219,30 +230,64 @@ def filter_merged_panels(panels_data: List[Dict], filters: Dict[str, Any]) -> Li
             # [Case 1] 지역 (우선순위 적용)
             if key == 'region':
                 panel_value = panel.get('region') or panel.get('region_major')
+    
+                if panel_value:
+                    str_val = str(panel_value).strip()
+        
+                    # qpoll의 "서울 중구"에서 "서울"만 추출
+                    if ' ' in str_val:
+                        major_region = str_val.split(' ')[0]
+                    else:
+                        major_region = str_val
+        
+                    norm_val = major_region
+                else:
+                    norm_val = ""
+
+            # 성별 - 정규화 매핑 추가
+            elif key == 'gender':
+                panel_value = panel.get('gender')
+
+                # 값 정규화 (qpoll: "남", welcome: "M")
+                gender_map = {'남': 'M', '여': 'F', 'M': 'M', 'F': 'F', '남성': 'M', '여성': 'F'}
+                raw_val = str(panel_value).strip() if panel_value else ""
+                norm_val = gender_map.get(raw_val, raw_val)
             
-            # [Case 2] 나이 범위
+            #  나이 범위 
             elif key == 'age_range' and isinstance(condition, list) and len(condition) == 2:
                 birth_year = panel.get('birth_year')
                 if birth_year:
                     try:
-                        b_year = int(str(birth_year).split('.')[0])
+            # ✅ 8자리 이상 숫자 처리
+                        b_year_str = str(birth_year)
+                        if b_year_str.isdigit() and len(b_year_str) >= 4:
+                            b_year = int(b_year_str[:4])
+                        else:
+                            b_year = int(b_year_str.split('.')[0])
+            
                         age = current_year - b_year
+            
                         if not (condition[0] <= age <= condition[1]):
                             is_match = False
                             drop_reason = f"나이 불일치 (생년:{birth_year}->나이:{age}, 조건:{condition})"
                             break
-                        continue 
+                        continue
                     except:
                         pass
-                continue 
+                continue
 
             # [Case 3] 일반 필드 값 가져오기
             else:
                 panel_value = panel.get(key)
 
-            # --- 값 비교 (유연한 로직) ---
             str_val = str(panel_value).strip() if panel_value is not None else ""
             
+            # 빈 값, 'nan', '-', 'null' 등 비응답 데이터는 조건 일치 여부와 관계없이 탈락
+            if not str_val or str_val.lower() in ('nan', '', 'null', '-'):
+                is_match = False
+                drop_reason = f"필수 필드 값 누락 (키:{key}, 값:{panel_value})"
+                break
+
             # 1. 데이터 정규화 시도
             norm_val = VALUE_NORMALIZATION.get(str_val, str_val)
             if norm_val == str_val and str_val.capitalize() in VALUE_NORMALIZATION:

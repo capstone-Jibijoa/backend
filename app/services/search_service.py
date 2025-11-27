@@ -48,6 +48,9 @@ class SearchService:
         # 1. 공통 검색 수행
         lite_info, panel_ids, classification = await self._perform_common_search(query_text, mode="lite")
         
+        user_limit = classification.get('limit', 100)
+        target_panel_ids = panel_ids[:user_limit]
+
         # 2. 화면 표시 필드 결정 (정렬 로직 개선됨)
         display_fields = self._prepare_display_fields(classification, query_text)
         
@@ -56,8 +59,8 @@ class SearchService:
         qpoll_fields = [f for f in field_keys if f in QPOLL_FIELD_TO_TEXT]
         
         welcome_data, qpoll_data = await asyncio.gather(
-            asyncio.to_thread(self.panel_repo.get_panels_by_ids, panel_ids[:500]),
-            asyncio.to_thread(self.qpoll_repo.get_responses_for_table, panel_ids[:500], qpoll_fields)
+            asyncio.to_thread(self.panel_repo.get_panels_by_ids, target_panel_ids),
+            asyncio.to_thread(self.qpoll_repo.get_responses_for_table, target_panel_ids, qpoll_fields)
         )
 
         # 4. 데이터 병합 (포맷팅 적용됨)
@@ -447,7 +450,8 @@ class SearchService:
         
         return final_list[:12]
 
-    def _merge_table_data(self, welcome_data: List[Dict], qpoll_data: Dict, display_fields: List[Dict], classification: Dict) -> List[Dict]:
+    def _merge_table_data(self, welcome_data: List[Dict], qpoll_data: Dict, 
+                     display_fields: List[Dict], classification: Dict) -> List[Dict]:
         """
         DB 데이터 + Qdrant 데이터 병합 + 필드 값 가공 + *필요한 컬럼만 필터링*
         """
@@ -457,40 +461,47 @@ class SearchService:
 
         for row in welcome_data:
             pid = row.get('panel_id')
-            
+        
             # 1. QPoll 데이터 병합 
             if pid and pid in qpoll_data:
                 row.update(qpoll_data[pid])
-            
-            # 2. 타겟 필드 유효성 검사 (Pro 모드 필터링)
+        
+            # ✅ 2. 필수 필드 검증 (성별/나이/지역 중 하나라도 없으면 제외)
+            required_checks = [
+                row.get('gender') and str(row.get('gender')).strip() not in ['', 'NaN', 'None', '-'],
+                row.get('birth_year') and str(row.get('birth_year')).strip() not in ['', 'NaN', 'None', '-', '0'],
+                row.get('region_major') and str(row.get('region_major')).strip() not in ['', 'NaN', 'None', '-']
+            ]
+        
+            # ✅ 최소 2개 이상의 필수 필드가 있어야 유효한 행으로 간주
+            if sum(required_checks) < 2:
+                logging.warning(f"⚠️ [Data Skip] ID({pid}) 필수 데이터 부족 (gender/birth_year/region_major)")
+                continue
+        
+            # 3. 타겟 필드 유효성 검사 (Pro 모드 필터링)
             is_valid_row = True
             if target_field and target_field != 'unknown':
                 val = row.get(target_field)
-                if not val or str(val).strip().lower() == 'nan':
+                if not val or str(val).strip().lower() in ['nan', '', 'none']:
                     is_valid_row = False
-            
-            # 3. 데이터 가공 및 '선별된 컬럼만' 담기
+        
+            # 4. 데이터 가공 및 '선별된 컬럼만' 담기
             if is_valid_row:
-                # 원본 row를 그대로 쓰지 않고, 보여줄 데이터만 담을 새 딕셔너리 생성
                 filtered_row = {'panel_id': pid} 
-                
+            
                 for field in field_keys:
                     val = row.get(field)
-                    
-                    # (A) 생년월일 -> 연령대 변환
-                    # if field == 'birth_year':
-                    #    val = get_age_group(val)
-                    
-                    # (B) Q-Poll 서술형 응답 -> 핵심 답변 추출
+                
+                # (B) Q-Poll 서술형 응답 -> 핵심 답변 추출
                     if field in QPOLL_FIELD_TO_TEXT and val:
                         val = extract_answer_from_template(field, str(val))
-                        
-                    # (C) 리스트 -> 문자열 변환
+                    
+                # (C) 리스트 -> 문자열 변환
                     elif isinstance(val, list):
                         val = ", ".join(map(str, val))
-                    
-                    # (D) 결측치 처리 및 말줄임
-                    if not val or str(val).strip().lower() == 'nan':
+                
+                # (D) 결측치 처리 및 말줄임
+                    if not val or str(val).strip().lower() in ['nan', '', 'none']:
                         filtered_row[field] = "-"
                     else:
                         filtered_row[field] = truncate_text(str(val), 20)
