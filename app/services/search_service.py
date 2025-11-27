@@ -13,7 +13,6 @@ from app.repositories.panel_repo import PanelRepository
 from app.repositories.qpoll_repo import QpollRepository
 from app.database.connection import get_qdrant_client  
 
-# 텍스트 유틸리티 추가 (연령대 변환, 답변 추출용)
 from app.utils.common import (
     truncate_text, 
     clean_label, 
@@ -23,7 +22,6 @@ from app.utils.common import (
     get_negative_patterns
 )
 
-# 상수 및 매핑 규칙
 from app.constants.mapping import (
     FIELD_NAME_MAP, 
     QPOLL_FIELD_TO_TEXT, 
@@ -51,7 +49,7 @@ class SearchService:
         user_limit = classification.get('limit', 100)
         target_panel_ids = panel_ids[:user_limit]
 
-        # 2. 화면 표시 필드 결정 (정렬 로직 개선됨)
+        # 2. 화면 표시 필드 결정
         display_fields = self._prepare_display_fields(classification, query_text)
         
         # 3. 데이터 페칭
@@ -63,7 +61,7 @@ class SearchService:
             asyncio.to_thread(self.qpoll_repo.get_responses_for_table, target_panel_ids, qpoll_fields)
         )
 
-        # 4. 데이터 병합 (포맷팅 적용됨)
+        # 4. 데이터 병합
         table_data = self._merge_table_data(welcome_data, qpoll_data, display_fields, classification)
         
         search_time = time.time() - start_time
@@ -114,7 +112,7 @@ class SearchService:
 
     async def _hybrid_search_logic(self, query: str, limit: int, classification: Dict) -> Dict:
         """
-        Semantic Search V3 로직 (디버깅 로그 강화)
+        Semantic Search V3 로직
         """
         try:
             logging.info("="*50)
@@ -157,12 +155,11 @@ class SearchService:
             is_structured_target = target_field and target_field not in QPOLL_FIELD_TO_TEXT
 
             # [Case A] 정형 데이터 타겟 + SQL 필터 존재 -> 벡터 검색 생략하고 바로 반환
-            # 수정: 타겟 필드가 정형 데이터(is_structured_target)라면, 의도(intent)와 상관없이 SQL 결과만 사용
             if filtered_panel_ids and is_structured_target:
                 logging.info(f"   🏃‍♂️ [Skip] 정형 데이터 타겟({target_field}) -> 벡터 검색 생략")
                 final_panel_ids = filtered_panel_ids
 
-            # [Case B] 벡터 검색 필요 (비정형 타겟이거나 SQL 결과가 없거나, 타겟이 불분명할 때)
+            # [Case B] 벡터 검색 필요
             elif intent:
                 qdrant_client = get_qdrant_client()
                 query_vector = await asyncio.to_thread(self.embeddings.embed_query, intent)
@@ -185,7 +182,7 @@ class SearchService:
                         target_question=target_question_text
                     )
                     vector_matched_ids = set(reranked_ids)
-                    logging.info(f"   ✅ [Rerank] 완료: {len(filtered_panel_ids)}명 -> {len(vector_matched_ids)}명 (유사도/부정어 필터링)")
+                    logging.info(f"   ✅ [Rerank] 완료: {len(filtered_panel_ids)}명 -> {len(vector_matched_ids)}명")
 
                 # [분기 2] SQL 결과 없음 -> 일반 벡터 검색
                 else:
@@ -196,28 +193,20 @@ class SearchService:
                         self._search_vectors_basic,
                         qdrant_client, collection_name, query_vector, target_question_text, vector_search_k
                     )
-                    logging.info(f"   📥 [Vector] Raw 결과: {len(search_results)}건")
-
                     valid_hits = self._process_vector_hits(search_results, negative_patterns, is_welcome)
                     vector_matched_ids = set(valid_hits)
                     logging.info(f"   ✅ [Vector] 텍스트 후처리 완료: {len(vector_matched_ids)}명 (부정어 제외)")
                     
-                    # 부정 조건 필터링 (심화)
                     if negative_conditions and vector_matched_ids:
                         neg_keywords = [q for nc in negative_conditions for q in nc.get('expanded_queries', [])]
                         if neg_keywords:
-                            logging.info(f"   🚫 [Negative] 부정 조건 필터링 적용: {neg_keywords}")
-                            before_cnt = len(vector_matched_ids)
-                            # (간단한 필터링 로직 호출)
                             vector_matched_ids = await self._apply_negative_vector_filter(
                                 vector_matched_ids, neg_keywords, qdrant_client, collection_name
                             )
-                            logging.info(f"   ✂️ [Negative] 필터링 결과: {before_cnt}명 -> {len(vector_matched_ids)}명")
 
                 final_panel_ids = vector_matched_ids
 
             else:
-                # 의도가 없거나 타겟 필드를 못 찾은 경우 SQL 결과만 사용
                 logging.info("   ⚠️ [Warning] 의도/타겟 불분명 -> SQL 필터 결과만 사용")
                 final_panel_ids = filtered_panel_ids
 
@@ -274,11 +263,6 @@ class SearchService:
                         filters_for_sql.append({"field": target_field, "operator": "eq", "value": key})
                         is_specific = True
                         break
-            
-            # [수정] 타겟 필드가 NULL이어도 검색되도록 강제 조건 제거
-            # if not is_specific:
-            #    filters_for_sql.append({"field": target_field, "operator": "not_null", "value": "check"})
-            
         return filters_for_sql
 
     def _get_collection_config(self, target_field: str) -> Tuple[str, str, Optional[str], bool]:
@@ -346,48 +330,32 @@ class SearchService:
         return valid_ids
 
     async def _apply_negative_vector_filter(self, panel_ids: Set[str], neg_keywords: List[str], client, collection_name: str, threshold: float = 0.55) -> Set[str]:
-        """
-        부정 키워드와 유사한 벡터를 가진 패널을 검색 결과에서 제외 (캡스톤 로직 복원)
-        """
         if not panel_ids or not neg_keywords:
             return panel_ids
 
         logging.info(f"🚫 [Negative Filter] 제외 키워드: {neg_keywords} (Threshold: {threshold})")
-        
-        # 부정 키워드 벡터화
         neg_vectors = await asyncio.to_thread(self.embeddings.embed_documents, neg_keywords)
-        
         ids_to_exclude = set()
-        
-        # 각 부정 벡터에 대해 유사한 패널 검색
         for vector in neg_vectors:
             try:
-                # Qdrant 검색 (점수가 threshold 이상이면 제외 대상)
                 search_results = await asyncio.to_thread(
                     client.search,
                     collection_name=collection_name,
                     query_vector=vector,
-                    limit=2000, # 충분히 많은 수 검색
+                    limit=2000,
                     with_payload=True,
                     score_threshold=threshold
                 )
-                
                 for hit in search_results:
-                    # 메타데이터 혹은 페이로드에서 panel_id 추출
                     pid = hit.payload.get('panel_id')
                     if not pid and 'metadata' in hit.payload:
                         pid = hit.payload['metadata'].get('panel_id')
-                    
-                    if pid:
-                        ids_to_exclude.add(str(pid))
-                        
+                    if pid: ids_to_exclude.add(str(pid))
             except Exception as e:
                 logging.error(f"부정 필터 검색 중 오류: {e}")
 
         if ids_to_exclude:
             logging.info(f"   ✂️ [Negative] {len(ids_to_exclude)}명 제외됨")
-        
-        # 차집합 반환
         return panel_ids - ids_to_exclude
 
     @staticmethod
@@ -396,13 +364,9 @@ class SearchService:
         return re.sub(r'[^a-zA-Z0-9가-힣]', '', text)
 
     def _prepare_display_fields(self, classification: Dict, query_text: str) -> List[Dict]:
-        """
-        화면에 표시할 컬럼을 결정하고 '고정된 우선순위'로 정렬합니다.
-        """
         relevant_fields = {"gender", "birth_year", "region_major"}
         target_field = classification.get('target_field')
 
-        # 1. 연관 필드 수집
         if target_field and target_field in QPOLL_FIELD_TO_TEXT:
             relevant_fields.update(["job_title_raw", "education_level", "income_household_monthly"])
         
@@ -421,14 +385,11 @@ class SearchService:
             relevant_fields.update(dynamic)
 
         final_list = []
-
-        # [1] Target Field 
         if target_field and target_field != 'unknown':
             label = QPOLL_FIELD_TO_TEXT.get(target_field, FIELD_NAME_MAP.get(target_field, target_field))
             final_list.append({'field': target_field, 'label': label})
             relevant_fields.discard(target_field)
 
-        # [2] 주요 인구통계 (고정 순서: 성별 -> 나이 -> 지역 -> 직업 -> 학력 -> 소득)
         priority_order = [
             "gender", "birth_year", "region_major", 
             "job_title_raw", "education_level", "income_household_monthly",
@@ -440,7 +401,6 @@ class SearchService:
                 final_list.append({'field': field, 'label': FIELD_NAME_MAP.get(field, field)})
                 relevant_fields.discard(field) 
 
-        # [3] 나머지 필드 (알파벳순 또는 임의 순서)
         remaining_fields = sorted(list(relevant_fields))
         for field in remaining_fields:
             if field in FIELD_NAME_MAP:
@@ -462,50 +422,38 @@ class SearchService:
         for row in welcome_data:
             pid = row.get('panel_id')
         
-            # 1. QPoll 데이터 병합 
             if pid and pid in qpoll_data:
                 row.update(qpoll_data[pid])
         
-            # ✅ 2. 필수 필드 검증 (성별/나이/지역 중 하나라도 없으면 제외)
+            # ✅ [수정] 필수 필드 검증 (bool()로 감싸서 None 반환 방지)
             required_checks = [
-                row.get('gender') and str(row.get('gender')).strip() not in ['', 'NaN', 'None', '-'],
-                row.get('birth_year') and str(row.get('birth_year')).strip() not in ['', 'NaN', 'None', '-', '0'],
-                row.get('region_major') and str(row.get('region_major')).strip() not in ['', 'NaN', 'None', '-']
+                bool(row.get('gender') and str(row.get('gender')).strip() not in ['', 'NaN', 'None', '-']),
+                bool(row.get('birth_year') and str(row.get('birth_year')).strip() not in ['', 'NaN', 'None', '-', '0']),
+                bool(row.get('region_major') and str(row.get('region_major')).strip() not in ['', 'NaN', 'None', '-'])
             ]
         
-            # ✅ 최소 2개 이상의 필수 필드가 있어야 유효한 행으로 간주
             if sum(required_checks) < 2:
                 logging.warning(f"⚠️ [Data Skip] ID({pid}) 필수 데이터 부족 (gender/birth_year/region_major)")
                 continue
         
-            # 3. 타겟 필드 유효성 검사 (Pro 모드 필터링)
             is_valid_row = True
             if target_field and target_field != 'unknown':
                 val = row.get(target_field)
                 if not val or str(val).strip().lower() in ['nan', '', 'none']:
                     is_valid_row = False
         
-            # 4. 데이터 가공 및 '선별된 컬럼만' 담기
             if is_valid_row:
                 filtered_row = {'panel_id': pid} 
-            
                 for field in field_keys:
                     val = row.get(field)
-                
-                # (B) Q-Poll 서술형 응답 -> 핵심 답변 추출
                     if field in QPOLL_FIELD_TO_TEXT and val:
                         val = extract_answer_from_template(field, str(val))
-                    
-                # (C) 리스트 -> 문자열 변환
                     elif isinstance(val, list):
                         val = ", ".join(map(str, val))
-                
-                # (D) 결측치 처리 및 말줄임
                     if not val or str(val).strip().lower() in ['nan', '', 'none']:
                         filtered_row[field] = "-"
                     else:
                         filtered_row[field] = truncate_text(str(val), 20)
-
                 merged.append(filtered_row)
 
         return merged

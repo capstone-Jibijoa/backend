@@ -12,6 +12,7 @@ load_dotenv()
 
 _connection_pool = None
 _pool_lock = Lock()
+_qdrant_client = None  # 싱글톤 인스턴스 저장용
 
 def get_connection_pool():
     """
@@ -96,17 +97,26 @@ def close_connection_pool():
 
 
 def get_qdrant_client():
-    """Qdrant 클라이언트를 생성하고 반환합니다."""
-    try:
-        client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", 6333)),
-            timeout=20.0
-        )
-        return client
-    except Exception as e:
-        logging.error(f"Qdrant 클라이언트 연결 실패: {e}")
-        return None
+    """
+    Qdrant 클라이언트를 싱글톤으로 관리하여 연결 오버헤드 제거
+    """
+    global _qdrant_client
+    
+    if _qdrant_client is None:
+        try:
+            # [최적화] keepalive 설정 및 타임아웃 증가
+            _qdrant_client = QdrantClient(
+                host=os.getenv("QDRANT_HOST", "localhost"),
+                port=int(os.getenv("QDRANT_PORT", 6333)),
+                timeout=30.0, 
+                prefer_grpc=False  # HTTP 사용 시
+            )
+            logging.info("✅ Qdrant Client 싱글톤 생성 완료")
+        except Exception as e:
+            logging.error(f"Qdrant 연결 실패: {e}")
+            return None
+            
+    return _qdrant_client
 
 
 def log_search_query(query: str, results_count: int, user_uid: int = None):
