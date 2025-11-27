@@ -96,6 +96,7 @@ class AnalysisService:
         1. 검색 조건(필터)에 사용된 필드는 'search_used_fields'로 등록하여 중복/당연한 차트 생성을 방지합니다.
         2. 파생 로직(지역->세부지역, 자녀->결혼무시, 차량->차종)을 우선 적용합니다.
         3. Semantic Intent 및 Target Field를 시각화합니다.
+        4. 교차 분석(Crosstab)을 우선적으로 생성합니다.
         """
         charts = []
         used_fields = []
@@ -104,22 +105,39 @@ class AnalysisService:
 
         # [A] 검색 필터(Demographic & Semantic) 식별 -> 차트 생성 방지용
         demographic_filters = classification.get('demographic_filters', {})
-        if 'age_range' in demographic_filters: search_used_fields.add('birth_year')
+        if 'age_range' in demographic_filters: 
+            search_used_fields.add('birth_year')
         for key in demographic_filters:
-            if key != 'age_range': search_used_fields.add(key)
+            if key != 'age_range': 
+                search_used_fields.add(key)
         
         semantic_conditions = classification.get('semantic_conditions', [])
-        # 의도 분석에 사용된 필드도 식별 (단, 시각화 가치가 있으면 아래에서 허용)
 
         # [Logic 1] 자녀 필터 있으면 결혼 상태 차트는 무의미하므로 제외 처리
         if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
-            # [FIX] 자녀가 있으면 99% 기혼이므로, 결혼 여부 차트는 정보 가치가 낮아 생성 제외 대상에 추가
             search_used_fields.add('marital_status')
 
         # [Logic 2] 지역 필터(Region Major) 있으면 -> 세부 지역(Region Minor) 차트 자동 추가 (0순위)
-        if 'region_major' in demographic_filters and 'region_minor' not in used_fields:
-            chart_tasks.append({"type": "filter", "field": "region_minor", "priority": 0})
-            used_fields.append("region_minor")
+        # ✅ region_major를 완전히 제외 처리
+        if 'region_minor' not in used_fields:
+            region_in_filters = 'region_major' in demographic_filters or 'region' in demographic_filters
+            
+            region_values = [p.get('region_major') for p in panels_data if p.get('region_major')]
+            unique_regions = set(region_values) if region_values else set()
+            has_region_diversity = len(unique_regions) >= 2
+            
+            if region_in_filters or has_region_diversity:
+                reasons = []
+                if region_in_filters: reasons.append("필터")
+                if has_region_diversity: reasons.append(f"분포({len(unique_regions)}개)")
+                
+                logging.info(f"   🗺️ [Logic 2] region_minor 추가: {', '.join(reasons)}")
+                chart_tasks.append({"type": "filter", "field": "region_minor", "priority": 0})
+                used_fields.append("region_minor")
+                
+                # ✅ region_major 완전 제외
+                search_used_fields.add('region_major')
+                logging.info("   🗺️ [Logic 2] region_major 제외 처리 (중복 방지)")
 
         # [B] Target Field (0순위) - 사용자가 가장 궁금해하는 핵심 질문
         target_field = classification.get('target_field')
@@ -131,9 +149,14 @@ class AnalysisService:
                 chart_tasks.append({"type": "qpoll", "field": target_field, "priority": priority})
                 used_fields.append(target_field)
                 
-                # [Logic 3] Q-Poll 타겟이면 기본 인구통계(성별, 연령, 지역) 자동 추가 (1순위)
-                # 단, 이미 검색 조건으로 쓰인 필드는 제외
-                basic_demos = ['gender', 'birth_year', 'region_major']
+                # [Logic 3] Q-Poll 타겟이면 기본 인구통계(성별, 연령) 자동 추가 (1순위)
+                # ✅ region_major는 region_minor가 있으면 제외
+                basic_demos = ['gender', 'birth_year']
+                
+                # ✅ region_minor가 없고, region_major가 필터도 아니면 추가
+                if 'region_minor' not in used_fields and 'region_major' not in search_used_fields:
+                    basic_demos.append('region_major')
+                
                 for field in basic_demos:
                     if field not in used_fields and field not in search_used_fields:
                         chart_tasks.append({"type": "filter", "field": field, "priority": 1})
@@ -179,8 +202,6 @@ class AnalysisService:
                 if 'car_model_raw' not in used_fields:
                     chart_tasks.append({"type": "filter", "field": "car_model_raw", "priority": 1})
                     used_fields.append("car_model_raw")
-                if 'car_ownership' not in used_fields:
-                    pass 
 
         # 실행: Priority 순으로 정렬하여 차트 생성
         chart_tasks.sort(key=lambda x: x['priority'])
@@ -205,31 +226,62 @@ class AnalysisService:
                         if vals and vals[0] > 95.0 and res.get('field') in search_used_fields:
                             continue 
                         charts.append(res)
-                except Exception:
-                    pass
+                        logging.info(f"   ✅ [Chart Added] '{res.get('topic')}' (현재: {len(charts)}개)")
+                except Exception as e:
+                    logging.error(f"   ❌ [Chart Error] {e}", exc_info=True)
 
-        # [D] 차트 부족 시: 교차 분석 (Crosstab)
+        # [D] 교차 분석 (Crosstab) - 우선 순위 상향
+        # ✅ 무조건 1~2개 이상의 교차 분석 차트 생성
         if len(charts) < 5:
             pivot_field = target_field if (target_field and target_field in used_fields) else (used_fields[0] if used_fields else None)
+            
             if pivot_field:
                 pivot_name = QPOLL_FIELD_TO_TEXT.get(pivot_field, FIELD_NAME_MAP.get(pivot_field, pivot_field))
-                standard_axes = [('birth_year','연령대'), ('gender','성별'), ('region_major','지역'), ('job_title_raw','직업')]
                 
+                # ✅ 교차 분석 축 우선순위 개선
+                # 타겟이 Q-Poll이면 인구통계와 교차, 타겟이 인구통계면 다른 인구통계와 교차
+                if pivot_field in QPOLL_FIELD_TO_TEXT:
+                    # Q-Poll 타겟 → 인구통계 축
+                    standard_axes = [
+                        ('birth_year', '연령대'), 
+                        ('gender', '성별'), 
+                        ('region_minor', '세부 지역'),  # ✅ region_major 대신 region_minor
+                        ('income_household_monthly', '가구 소득'),
+                        ('job_title_raw', '직업')
+                    ]
+                else:
+                    # 인구통계 타겟 → Q-Poll 축 우선
+                    standard_axes = [
+                        ('ott_count', 'OTT 이용 개수'),  # ✅ 타겟과 관련된 Q-Poll 필드 예시
+                        ('birth_year', '연령대'),
+                        ('gender', '성별')
+                    ]
+                
+                crosstab_added = 0
                 for ax_field, ax_name in standard_axes:
                     if len(charts) >= 5: break
+                    if crosstab_added >= 2: break  # ✅ 최대 2개까지만
+                    
                     # 축으로 사용할 필드가 이미 100% 쏠린 필드(검색 조건)라면 건너뜀
-                    if ax_field == pivot_field or ax_field in search_used_fields: continue
+                    if ax_field == pivot_field or ax_field in search_used_fields: 
+                        continue
                     
                     crosstab = self._create_crosstab_chart(panels_data, ax_field, pivot_field, ax_name, pivot_name)
                     if crosstab and crosstab.get('chart_data'):
                         charts.append(crosstab)
+                        crosstab_added += 1
+                        logging.info(f"   📊 [Crosstab Added] {ax_name} x {pivot_name}")
 
         # [E] 차트 부족 시: 특이점(High Ratio) 자동 발굴
         if len(charts) < 5:
             # 이미 사용된 필드와 검색 필터를 제외한 나머지 중에서 찾기
             exclude_for_high_ratio = list(set(used_fields) | search_used_fields)
             
-            # [New Logic] '결혼 여부'도 자녀 조건이 있으면 제외 대상에 추가
+            # ✅ region_minor가 있으면 region_major 제외
+            if 'region_minor' in used_fields:
+                exclude_for_high_ratio.append('region_major')
+            
+            # [기존 로직] '결혼 여부'도 자녀 조건이 있으면 제외 대상에 추가
             if 'children_count' in demographic_filters or 'children_count' in search_used_fields:
                 exclude_for_high_ratio.append('marital_status')
 
@@ -243,8 +295,10 @@ class AnalysisService:
         crosstab = {}
         
         vals1 = [p.get(field1) for p in panels_data if p.get(field1)]
-        if field1 == 'birth_year': vals1 = [get_age_group(v) for v in vals1]
-        if not vals1: return {}
+        if field1 == 'birth_year': 
+            vals1 = [get_age_group(v) for v in vals1]
+        if not vals1: 
+            return {}
         
         top_groups = [k for k, v in Counter(vals1).most_common(5)]
 
@@ -252,7 +306,8 @@ class AnalysisService:
             group_panels = []
             for p in panels_data:
                 p_val1 = p.get(field1)
-                if field1 == 'birth_year': p_val1 = get_age_group(p_val1)
+                if field1 == 'birth_year': 
+                    p_val1 = get_age_group(p_val1)
                 if str(p_val1) == str(group):
                     group_panels.append(p)
             
@@ -260,14 +315,17 @@ class AnalysisService:
             for p in group_panels:
                 v = p.get(field2)
                 if v:
-                    if isinstance(v, list): vals2.extend(v)
-                    else: vals2.append(v)
+                    if isinstance(v, list): 
+                        vals2.extend(v)
+                    else: 
+                        vals2.append(v)
             
             if vals2:
                 dist = calculate_distribution([clean_label(v) for v in vals2])
                 crosstab[str(group)] = dict(sorted(dist.items(), key=lambda x: x[1], reverse=True)[:5])
 
-        if not crosstab: return {}
+        if not crosstab: 
+            return {}
 
         return {
             "topic": f"{name1}별 {name2} 분포",
@@ -433,8 +491,11 @@ class AnalysisService:
 
         # 3. LLM 요약 요청 (조건과 발견을 분리)
         full_context = f"""
-        {filter_text}
-        {chr(10).join(stats_context)}
+검색 조건:
+{filter_text}
+
+발견된 특징:
+{chr(10).join(stats_context)}
         """
         
         return await self.llm_service.generate_analysis_summary(query, full_context, len(panel_ids))

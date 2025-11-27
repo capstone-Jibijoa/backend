@@ -28,24 +28,63 @@ class PanelRepository:
         return {}
 
     def get_panels_by_ids(self, panel_ids: List[str]) -> List[Dict]:
-        """패널 ID 리스트로 데이터 조회"""
+        """패널 ID 리스트로 데이터 조회 (welcome 우선, qpoll 보조)"""
         if not panel_ids: return []
         results = []
         try:
             with get_db_connection_context() as conn:
                 with conn.cursor() as cur:
                     query = """
-                        SELECT t.panel_id, t.structured_data
+                        SELECT 
+                            t.panel_id, 
+                            t.structured_data,
+                            q.category,
+                            q.gender,
+                            q.age_raw,
+                            q.region
                         FROM welcome_meta2 t
                         JOIN unnest(%s::text[]) WITH ORDINALITY AS o(pid, ord) ON t.panel_id = o.pid
+                        LEFT JOIN qpoll_meta q ON t.panel_id = q.panel_id
                         ORDER BY o.ord
                     """
                     cur.execute(query, (panel_ids,))
-                    for pid, data in cur.fetchall():
-                        if data:
-                            row = {"panel_id": pid}
-                            row.update(data)
-                            results.append(row)
+                
+                    for row in cur.fetchall():
+                        pid = row[0]
+                        panel = {"panel_id": pid}
+                    
+                        # 1. Welcome 데이터 병합 (기본값)
+                        if row[1] and isinstance(row[1], dict):
+                            panel.update(row[1])
+
+                        if 'region_minor' in panel:
+                            logging.debug(f"   [Data] ID({pid[:10]}...) region_minor: {panel['region_minor']}")
+                    
+                        # 2. ✅ Qpoll 데이터 병합 (welcome에 없는 것만 추가)
+                        if row[2]:  # category
+                            panel['category'] = row[2]
+                    
+                        # ✅ 성별: welcome 우선 (welcome에 없으면 qpoll 변환)
+                        if 'gender' not in panel or not panel['gender']:
+                            if row[3]:  # qpoll gender
+                                gender_map = {'남': 'M', '여': 'F'}
+                                panel['gender'] = gender_map.get(row[3], row[3])
+                    
+                        # ✅ 지역: welcome 우선 (welcome에 없으면 qpoll에서 추출)
+                        if 'region_major' not in panel or not panel['region_major']:
+                            if row[5]:  # qpoll region
+                                # "서울 중구" → "서울"
+                                panel['region_major'] = row[5].split(' ')[0] if ' ' in row[5] else row[5]
+                    
+                        # ✅ 나이: welcome 우선 (welcome에 없으면 qpoll age_raw에서 추출)
+                        if 'birth_year' not in panel or not panel['birth_year']:
+                            if row[4]:  # qpoll age_raw
+                                extracted_year = extract_birth_year_from_raw(row[4])
+                                if extracted_year > 1900:
+                                    panel['birth_year'] = extracted_year
+                    
+                        results.append(panel)
+                    
         except Exception as e:
             logging.error(f"패널 조회 실패: {e}")
         return results
@@ -68,9 +107,25 @@ class PanelRepository:
                         t.panel_id, 
                         t.structured_data,
                         q.category,
-                        q.gender,
-                        q.age_raw,
-                        q.region
+        
+                        -- ✅ welcome 데이터 우선, 없으면 qpoll 사용
+                        COALESCE(t.structured_data->>'gender', 
+                                CASE q.gender 
+                                    WHEN '남' THEN 'M' 
+                                    WHEN '여' THEN 'F' 
+                                    ELSE q.gender 
+                                 END) as gender,
+        
+                        COALESCE(
+                            (t.structured_data->>'birth_year')::int,
+                            NULLIF(REGEXP_REPLACE(q.age_raw, '[^0-9]', '', 'g'), '')::int
+                        ) as birth_year,
+        
+                        COALESCE(
+                            t.structured_data->>'region_major',
+                            SPLIT_PART(q.region, ' ', 1)
+                        ) as region_major
+        
                     FROM welcome_meta2 t
                     JOIN id_order o ON t.panel_id = o.panel_id
                     LEFT JOIN qpoll_meta q ON t.panel_id = q.panel_id
@@ -153,14 +208,22 @@ class PanelRepository:
             (7000000, 999999999, "월 700만원 이상")
         ]
 
+        VALID_SQL_FIELDS = [
+            'region', 'region_major', 'gender', 'age', 'birth_year', 
+            'marital_status', 'family_size', 'children_count', 
+            'job_title_raw', 'income_household_monthly', 'car_ownership',
+            'income_personal_monthly', 'drinking_experience', 'smoking_experience'
+        ]
+
         for f in filters:
             raw_field = f.get("field")
             operator = f.get("operator")
             value = f.get("value")
-
-            if not raw_field or not operator: continue
-
+            
             field = FIELD_ALIAS_MAP.get(raw_field, raw_field)
+
+            if field not in VALID_SQL_FIELDS and field not in VALUE_TRANSLATION_MAP:
+                continue
 
             # [값 매핑 및 역방향 확장]
             normalized_set = set()
@@ -207,28 +270,44 @@ class PanelRepository:
                 val_to_use = final_value[0]
             # -------------------------------------------------------------
 
-            # 1. 지역(region) 처리
+            # 1. 지역(region) 처리 - 정확한 매칭 로직
             if field in ['region', 'region_major']:
                 if isinstance(final_value, list):
                     or_conditions = []
                     for v in final_value:
-                        or_conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
-                        params.extend([f"%{v}%", f"%{v}%"])
+                        # qpoll의 region은 "서울 중구" 형태이므로 앞부분만 추출
+                        or_conditions.append(
+                            f"(SPLIT_PART(q.region, ' ', 1) = %s OR t.structured_data->>'region_major' = %s)"
+                        )
+                        params.extend([v, v])
                     if or_conditions:
                         conditions.append(f"({' OR '.join(or_conditions)})")
                 else:
-                    conditions.append(f"(q.region ILIKE %s OR t.structured_data->>'region_major' ILIKE %s)")
-                    params.extend([f"%{val_to_use}%", f"%{val_to_use}%"])
+                    conditions.append(
+                        f"(SPLIT_PART(q.region, ' ', 1) = %s OR t.structured_data->>'region_major' = %s)"
+                    )
+                    params.extend([val_to_use, val_to_use])
                 continue
 
-            # 2. 성별(gender) 처리
+            # 2. 성별(gender) 처리 - 값 정규화
             if field == 'gender':
                 val_list = final_value if isinstance(final_value, list) else [final_value]
                 gender_conditions = []
+    
+                # 정규화 매핑
+                gender_map = {'남': 'M', '여': 'F', 'M': 'M', 'F': 'F', '남성': 'M', '여성': 'F'}
+    
                 for v in val_list:
-                    gender_conditions.append(f"(t.structured_data->>'gender' = %s OR q.gender = %s)")
-                    params.extend([str(v), str(v)])
-                
+                    norm_v = gender_map.get(str(v), str(v))
+        
+                    # qpoll은 "남", welcome은 "M" 형태
+                    qpoll_val = '남' if norm_v == 'M' else ('여' if norm_v == 'F' else str(v))
+        
+                    gender_conditions.append(
+                        f"(t.structured_data->>'gender' = %s OR q.gender = %s)"
+                    )
+                    params.extend([norm_v, qpoll_val])
+    
                 if gender_conditions:
                     conditions.append(f"({' OR '.join(gender_conditions)})")
                 continue
@@ -260,18 +339,19 @@ class PanelRepository:
                     
                     age_condition = f"""
                         (
-                            (CASE WHEN t.structured_data->>'birth_year' ~ '^\\d{{4}}$' 
-                                  THEN (t.structured_data->>'birth_year')::int 
-                                  ELSE NULL END BETWEEN %s AND %s)
-                            OR 
-                            (CASE WHEN q.age_raw ~ '^\\d{{4}}' 
-                                  THEN substring(q.age_raw, 1, 4)::int 
-                                  ELSE NULL END BETWEEN %s AND %s)
+                            COALESCE(
+                                -- 1. welcome_meta2 JSONB의 birth_year를 정수화 (가장 신뢰도 높음)
+                                NULLIF(regexp_replace(t.structured_data->>'birth_year', '[^0-9]', '', 'g'), '')::int,
+                                -- 2. welcome_meta2에 없으면 qpoll_meta의 age_raw에서 연도 추출 (Fallback)
+                                CASE WHEN q.age_raw ~ '^\\d{{4}}' THEN substring(q.age_raw, 1, 4)::int ELSE NULL END
+                            ) BETWEEN %s AND %s
                         )
                     """
                     conditions.append(age_condition)
-                    params.extend([birth_year_start, birth_year_end, birth_year_start, birth_year_end])
-                continue
+                    
+                    # 이제 파라미터는 시작/끝 연도 두 개만 필요합니다.
+                    params.extend([birth_year_start, birth_year_end])
+                    continue
 
             # 5. Fuzzy Match
             if field in FUZZY_MATCH_FIELDS or field in ARRAY_FIELDS:
