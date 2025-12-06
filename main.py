@@ -29,6 +29,11 @@ from llm import parse_query_intelligent
 from mapping_rules import QPOLL_FIELD_TO_TEXT
 from db import init_db, cleanup_db, get_db_connection_context
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s:     %(message)s'
+)
+
 load_dotenv()
 
 app = FastAPI(title="Multi-Table Hybrid Search API v3 (Refactored)")
